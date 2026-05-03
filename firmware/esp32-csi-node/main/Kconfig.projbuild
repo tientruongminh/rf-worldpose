@@ -1,0 +1,29 @@
+menu "RF-WorldPose CSI Node"
+
+config RFPOSE_NODE_ID
+    int "RF-WorldPose node id"
+    range 1 255
+    default 1
+    help
+        Numeric node id encoded into CSI packets.
+
+config RFPOSE_FIRMWARE_VERSION
+    int "RF-WorldPose firmware version"
+    range 1 65535
+    default 1
+
+config RFPOSE_GATEWAY_HOST
+    string "RF-WorldPose gateway host"
+    default "192.168.1.100"
+
+config RFPOSE_GATEWAY_PORT
+    int "RF-WorldPose gateway UDP port"
+    range 1 65535
+    default 5006
+
+config RFPOSE_MAX_CSI_SUBCARRIERS
+    int "Maximum CSI subcarriers to encode"
+    range 30 256
+    default 128
+
+endmenu
