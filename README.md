@@ -111,3 +111,14 @@ cargo run
 # in another terminal, from repo root
 python tools/mock_sender/send_mock_csi.py --node-id 1 --count 100
 ```
+
+## Production documentation
+
+Start here:
+
+- [`docs/index.md`](docs/index.md)
+- [`docs/final-architecture.md`](docs/final-architecture.md)
+- [`docs/runbook.md`](docs/runbook.md)
+- [`docs/deployment.md`](docs/deployment.md)
+- [`docs/security.md`](docs/security.md)
+- [`docs/mlops.md`](docs/mlops.md)
