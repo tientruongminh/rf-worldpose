@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rfpose}
       POSTGRES_DB: ${POSTGRES_DB:-rfpose}
     ports: ["5432:5432"]
-    volumes: ["postgres:/var/lib/postgresql/data"]
+    volumes: ["postgres:/var/lib/postgresql/data", "../postgres/migrations:/docker-entrypoint-initdb.d:ro"]
 
   nats:
     image: nats:2.10
@@ -36,6 +36,23 @@ services:
     image: grafana/grafana:latest
     ports: ["3002:3000"]
     volumes: ["grafana:/var/lib/grafana"]
+
+  api:
+    image: python:3.11-slim
+    working_dir: /app
+    command: sh -c "pip install -e services/api && uvicorn rfpose_api.main:app --host 0.0.0.0 --port 8080"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rfpose}:${POSTGRES_PASSWORD:-rfpose}@postgres:5432/${POSTGRES_DB:-rfpose}
+      HELIOS_LOGIN: ${HELIOS_LOGIN:-login01.helios.cyfronet.pl}
+      HELIOS_ACCOUNT: ${HELIOS_ACCOUNT:-CHANGE_ME-gpu-gh200}
+      HELIOS_PARTITION: ${HELIOS_PARTITION:-plgrid-gpu-gh200}
+      S3_BUCKET: ${S3_BUCKET:-rfpose}
+      S3_ENDPOINT_URL: http://minio:9000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports: ["8080:8080"]
+    volumes:
+      - ../../:/app
+    depends_on: [postgres]
 
 volumes:
   postgres:
