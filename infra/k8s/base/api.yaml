@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: rfpose-api }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: rfpose-api } }
+  template:
+    metadata: { labels: { app: rfpose-api } }
+    spec:
+      containers:
+        - name: api
+          image: rfpose-api:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom: [{ secretRef: { name: rfpose-secrets } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rfpose-api }
+spec:
+  selector: { app: rfpose-api }
+  ports: [{ port: 8080, targetPort: 8080 }]

@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: rfpose-gateway }
+spec:
+  selector: { matchLabels: { app: rfpose-gateway } }
+  template:
+    metadata: { labels: { app: rfpose-gateway } }
+    spec:
+      hostNetwork: true
+      containers:
+        - name: gateway
+          image: rfpose-gateway:latest
+          envFrom: [{ secretRef: { name: rfpose-secrets } }]
+          ports: [{ containerPort: 5006, protocol: UDP }]

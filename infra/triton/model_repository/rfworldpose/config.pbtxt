@@ -1,0 +1,6 @@
+name: "rfworldpose"
+platform: "onnxruntime_onnx"
+max_batch_size: 32
+input [{ name: "csi" data_type: TYPE_FP32 dims: [4, 60, 56, 2] }]
+output [{ name: "outputs" data_type: TYPE_FP32 dims: [-1] }]
+instance_group [{ kind: KIND_GPU count: 1 }]
