@@ -1,0 +1,13 @@
+run:
+  seed: 42
+model:
+  name: rf_worldpose
+  adapter: lora
+training:
+  epochs: 50
+  batch_size: 128
+  lr: 0.0003
+  precision: bf16
+  checkpoint_every_minutes: 30
+dataset:
+  path: null

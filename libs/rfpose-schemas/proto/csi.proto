@@ -1,0 +1,28 @@
+syntax = "proto3";
+package rfpose.v1;
+
+message CsiPacket {
+  uint32 protocol_version = 1;
+  string deployment_id = 2;
+  string node_id = 3;
+  uint64 seq = 4;
+  uint64 timestamp_us = 5;
+  sint32 rssi = 6;
+  sint32 noise_floor = 7;
+  uint32 channel = 8;
+  uint32 n_subcarriers = 9;
+  repeated float amplitude = 10;
+  repeated float phase = 11;
+  bytes raw_iq = 12;
+  string firmware_version = 13;
+}
+
+message NodeHealth {
+  string deployment_id = 1;
+  string node_id = 2;
+  string firmware_version = 3;
+  uint64 uptime_sec = 4;
+  float packet_rate_hz = 5;
+  uint64 drop_count = 6;
+  uint64 free_heap = 7;
+}

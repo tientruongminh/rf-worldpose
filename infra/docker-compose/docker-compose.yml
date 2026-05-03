@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rfpose}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rfpose}
+      POSTGRES_DB: ${POSTGRES_DB:-rfpose}
+    ports: ["5432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+
+  nats:
+    image: nats:2.10
+    command: ["-js", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-rfpose}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-rfpose-secret}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio:/data"]
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root s3://rfpose/mlflow
+    ports: ["5000:5000"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes: ["../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3002:3000"]
+    volumes: ["grafana:/var/lib/grafana"]
+
+volumes:
+  postgres:
+  minio:
+  grafana:
