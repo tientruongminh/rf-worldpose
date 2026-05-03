@@ -7,13 +7,15 @@ cp .env.example .env
 docker compose -f infra/docker-compose/docker-compose.yml up -d
 ```
 
-## Milestones
+## Build order
 
-1. Firmware packet schema + gateway decoder.
-2. Bronze ingest + local buffer.
-3. Dagster Bronze→Silver→Gold ETL.
-4. Teacher label pipeline.
-5. Helios Slurm submitter.
-6. MLflow model registry + eval gates.
-7. Edge ONNX inference + dashboard.
-8. Monitoring, OTA, rollback, feedback loop.
+The build order is documented in [`implementation-plan.md`](implementation-plan.md). The project has one final architecture; milestones are only execution order, not separate product versions.
+
+## Local services
+
+- Postgres: metadata/control plane
+- NATS JetStream: event/stream transport
+- MinIO: local S3-compatible data lake
+- MLflow: experiment/model registry
+- Dagster: ETL orchestration
+- Prometheus/Grafana/Loki: observability

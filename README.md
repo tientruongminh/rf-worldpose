@@ -1,10 +1,35 @@
 # RF-WorldPose Platform
 
-Production/research platform for WiFi CSI human sensing:
+Production/research platform for WiFi CSI human sensing and WiFi-only skeleton/DensePose inference.
 
-`ESP32-S3 CSI mesh → Rust Edge Gateway → NATS/Ingest → MinIO/S3 Data Lake → Dagster ETL Bronze/Silver/Gold → Dataset Registry → Helios GH200 Slurm Training → MLflow Model Registry → ONNX/Triton Deployment → Monitoring + OTA + Feedback Loop`.
+## Final architecture
 
-## Production v1 Definition of Done
+```text
+ESP32-S3 CSI mesh
+→ Rust Edge Gateway
+→ NATS/Ingest
+→ MinIO/S3 Data Lake
+→ Dagster ETL Bronze/Silver/Gold
+→ Dataset Registry
+→ Helios GH200 Slurm Training
+→ MLflow Model Registry
+→ ONNX/Triton Deployment
+→ Monitoring + OTA + Feedback Loop
+```
+
+The canonical architecture spec is [`docs/final-architecture.md`](docs/final-architecture.md).
+
+## Mission
+
+```text
+Thu CSI từ ESP32-S3
+→ build dataset chuẩn
+→ train model trên Helios GH200
+→ deploy WiFi-only skeleton/DensePose inference
+→ monitor + feedback + cải thiện liên tục
+```
+
+## Production completion criteria
 
 - [ ] 4 ESP32-S3 stream CSI ổn định
 - [ ] Gateway validate + buffer + upload
@@ -30,7 +55,7 @@ cp .env.example .env
 docker compose -f infra/docker-compose/docker-compose.yml up -d
 ```
 
-Services:
+## Services
 
 - API: http://localhost:8080
 - Dashboard: http://localhost:3000
@@ -42,4 +67,15 @@ Services:
 
 ## Repository layout
 
-See [`docs/architecture.md`](docs/architecture.md) and [`docs/development.md`](docs/development.md).
+```text
+firmware/esp32-csi-node/      ESP-IDF firmware
+ gateway/rf-gateway/          Rust/Tokio edge gateway
+ services/                    API, ingest, inference, model registry
+ pipelines/dagster/           ETL Bronze/Silver/Gold
+ helios_runner/               Helios Slurm submitter
+ ml/                          PyTorch training/eval/export
+ libs/                        shared schemas/preprocess/core
+ dashboard/                   Next.js + WebSocket + Three.js
+ infra/                       compose/k8s/monitoring/security
+ docs/                        final architecture and implementation docs
+```
