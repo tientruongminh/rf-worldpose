@@ -15,3 +15,6 @@ crc32fast = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-nats = "0.36"
+aws-config = "1"
+aws-sdk-s3 = "1"
+uuid = { version = "1", features = ["v4"] }
