@@ -79,3 +79,35 @@ firmware/esp32-csi-node/      ESP-IDF firmware
  infra/                       compose/k8s/monitoring/security
  docs/                        final architecture and implementation docs
 ```
+
+## Self-install infrastructure later
+
+When ready to install/run the local stack:
+
+```bash
+./scripts/dev_up.sh
+export DATABASE_URL=postgresql://rfpose:rfpose@localhost:5432/rfpose
+./scripts/run_migrations.sh
+export MINIO_ENDPOINT=http://localhost:9000
+export MINIO_ROOT_USER=rfpose
+export MINIO_ROOT_PASSWORD=rfpose-secret
+export S3_BUCKET=rfpose
+./scripts/init_minio.sh
+```
+
+Test gateway with mock packets:
+
+```bash
+cd gateway/rf-gateway
+RFPOSE_DEPLOYMENT_ID=room01 \
+RFPOSE_GATEWAY_SQLITE=/tmp/rfpose-gateway.sqlite \
+NATS_URL=nats://localhost:4222 \
+S3_BUCKET=rfpose \
+S3_ENDPOINT_URL=http://localhost:9000 \
+AWS_ACCESS_KEY_ID=rfpose \
+AWS_SECRET_ACCESS_KEY=rfpose-secret \
+cargo run
+
+# in another terminal, from repo root
+python tools/mock_sender/send_mock_csi.py --node-id 1 --count 100
+```

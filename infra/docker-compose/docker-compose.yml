@@ -6,13 +6,13 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rfpose}
       POSTGRES_DB: ${POSTGRES_DB:-rfpose}
     ports: ["5432:5432"]
-    volumes: ["postgres:/var/lib/postgresql/data", "../postgres/migrations:/docker-entrypoint-initdb.d:ro"]
-
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ../postgres/migrations:/docker-entrypoint-initdb.d:ro
   nats:
     image: nats:2.10
     command: ["-js", "-m", "8222"]
     ports: ["4222:4222", "8222:8222"]
-
   minio:
     image: minio/minio:latest
     command: server /data --console-address ':9001'
@@ -21,22 +21,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-rfpose-secret}
     ports: ["9000:9000", "9001:9001"]
     volumes: ["minio:/data"]
-
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
-    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root s3://rfpose/mlflow
-    ports: ["5000:5000"]
-
-  prometheus:
-    image: prom/prometheus:latest
-    ports: ["9090:9090"]
-    volumes: ["../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
-
-  grafana:
-    image: grafana/grafana:latest
-    ports: ["3002:3000"]
-    volumes: ["grafana:/var/lib/grafana"]
-
   api:
     image: python:3.11-slim
     working_dir: /app
@@ -50,11 +34,44 @@ services:
       S3_ENDPOINT_URL: http://minio:9000
       MLFLOW_TRACKING_URI: http://mlflow:5000
     ports: ["8080:8080"]
-    volumes:
-      - ../../:/app
+    volumes: ["../../:/app"]
     depends_on: [postgres]
-
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root s3://rfpose/mlflow
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-rfpose}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-rfpose-secret}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    ports: ["5000:5000"]
+    volumes: ["mlflow:/mlflow"]
+    depends_on: [minio]
+  dagster:
+    image: python:3.11-slim
+    working_dir: /app
+    command: sh -c "pip install -e pipelines/dagster && dagster dev -h 0.0.0.0 -p 3001 -m rfpose_pipelines"
+    environment:
+      DAGSTER_HOME: /app/.dagster
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-rfpose}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rfpose}:${POSTGRES_PASSWORD:-rfpose}@postgres:5432/${POSTGRES_DB:-rfpose}
+    ports: ["3001:3001"]
+    volumes: ["../../:/app"]
+    depends_on: [postgres, minio]
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes: ["../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3002:3000"]
+    volumes: ["grafana:/var/lib/grafana"]
+  loki:
+    image: grafana/loki:2.9.8
+    command: -config.file=/etc/loki/local-config.yaml
+    ports: ["3100:3100"]
 volumes:
   postgres:
   minio:
+  mlflow:
   grafana:
