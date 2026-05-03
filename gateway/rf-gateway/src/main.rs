@@ -2,15 +2,19 @@ mod buffer;
 mod nats;
 mod packet;
 mod uploader;
+mod metrics;
+mod inference;
 
 use anyhow::Result;
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, sync::{Arc, Mutex, atomic::Ordering}, time::Duration};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 use buffer::LocalBuffer;
 use nats::NatsPublisher;
 use packet::{decode_csi_packet, NodeHealth};
 use uploader::{s3_client, BronzeUploader};
+use metrics::GatewayMetrics;
+use inference::EdgeInference;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,6 +32,8 @@ async fn main() -> Result<()> {
     let buffer = Arc::new(Mutex::new(LocalBuffer::open(&sqlite_path)?));
     let publisher = NatsPublisher::connect(nats_url, deployment_id.clone()).await?;
     let mut health: HashMap<u8, NodeHealth> = HashMap::new();
+    let metrics = Arc::new(GatewayMetrics::default());
+    let _edge_infer = EdgeInference::new(std::env::var("RFPOSE_ONNX_MODEL").ok());
 
     if let Some(bucket) = s3_bucket.clone() {
         let client = s3_client(s3_endpoint).await;
@@ -75,6 +81,7 @@ async fn main() -> Result<()> {
         let (n, addr) = sock.recv_from(&mut buf).await?;
         match decode_csi_packet(&buf[..n]) {
             Ok(pkt) => {
+                metrics.packets_ok.fetch_add(1, Ordering::Relaxed);
                 let h = health.entry(pkt.node_id).or_insert(NodeHealth {
                     node_id: pkt.node_id,
                     last_seq: pkt.seq,
@@ -106,6 +113,7 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => {
+                metrics.packets_bad.fetch_add(1, Ordering::Relaxed);
                 warn!(%addr, bytes = n, error = %e, "dropping invalid CSI packet");
             }
         }
