@@ -3,6 +3,9 @@ run:
 model:
   name: rf_worldpose
   adapter: lora
+  dim: 128
+  depth: 4
+  heads: 4
 training:
   epochs: 50
   batch_size: 128
@@ -11,3 +14,11 @@ training:
   checkpoint_every_minutes: 30
 dataset:
   path: null
+  num_nodes: 4
+  window_frames: 60
+  n_subcarriers: 56
+  channels: 2
+  num_classes: 6
+eval_gates:
+  min_macro_f1: 0.50
+  max_latency_p95_ms: 500

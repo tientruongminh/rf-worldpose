@@ -33,11 +33,8 @@ cd "$WORKDIR"
 
 aws s3 sync "s3://${S3_BUCKET}/gold/${DATASET_VERSION}/" ./dataset/ --endpoint-url "$S3_ENDPOINT_URL"
 
-torchrun --nproc_per_node=4 -m rfpose.training.train \
-  dataset.path=./dataset \
-  run.id="$RUN_ID" \
-  --config-name "$TRAIN_CONFIG"
+python -m rfpose.training.train --dataset ./dataset --output ./outputs --epochs ${EPOCHS:-50} --batch-size ${BATCH_SIZE:-128}
 
-python -m rfpose.evaluation.eval --run-id "$RUN_ID" --output ./outputs/eval_report.json
-python -m rfpose.export.onnx --run-id "$RUN_ID" --output ./outputs/model.onnx
+python -m rfpose.evaluation.eval --checkpoint ./outputs/best.pt --dataset ./dataset --output ./outputs/eval_report.json
+python -m rfpose.export.onnx --checkpoint ./outputs/best.pt --output ./outputs/model.onnx
 aws s3 sync ./outputs "s3://${S3_BUCKET}/models/${RUN_ID}/" --endpoint-url "$S3_ENDPOINT_URL"

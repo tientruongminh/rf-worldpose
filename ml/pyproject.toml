@@ -3,3 +3,6 @@ name = "rfpose-ml"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["torch", "numpy", "scikit-learn", "hydra-core", "mlflow", "onnx"]
+
+[tool.setuptools]
+packages = ["rfpose", "rfpose.data", "rfpose.models", "rfpose.training", "rfpose.evaluation", "rfpose.export", "rfpose.utils"]
