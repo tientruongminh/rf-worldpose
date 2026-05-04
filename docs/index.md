@@ -13,3 +13,5 @@
 - [Database schema](database-schema.md)
 - [Helios](helios.md)
 - [Testing](testing.md)
+
+<!-- Documentation maintained by HTrg (AI assistant). -->
