@@ -15,3 +15,7 @@ data/gold/**
 !data/silver/.gitkeep
 !data/gold/.gitkeep
 *.log
+
+# Next.js dashboard
+.next/
+dashboard/.next/
