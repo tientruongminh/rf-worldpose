@@ -1,9 +1,18 @@
-.PHONY: up down fmt test
+COMPOSE = docker compose -f infra/docker-compose/docker-compose.yml --env-file .env
+
+.PHONY: up down logs ps fmt test
+
 up:
-	docker compose -f infra/docker-compose/docker-compose.yml up -d
+	./scripts/dev_up.sh
 
 down:
-	docker compose -f infra/docker-compose/docker-compose.yml down
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs -f
+
+ps:
+	$(COMPOSE) ps
 
 fmt:
 	@echo "TODO: run cargo fmt, ruff, prettier"

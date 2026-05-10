@@ -84,23 +84,64 @@ firmware/esp32-csi-node/      ESP32-S3 CSI firmware, packet encoder, provisionin
 - mTLS, SOPS/Vault, signed OTA security docs
 - Production runbook and deployment documentation
 
+## Prerequisites
+
+| Tool | Required for |
+| --- | --- |
+| Docker + Docker Compose | Running the full stack |
+| `psql` (PostgreSQL client) | Database migrations |
+| Python 3.11+ | Mock sender, ETL, ML training |
+| Rust toolchain (optional) | Building the gateway |
+| Node.js 18+ (optional) | Building the dashboard |
+
 ## Quick start
 
-Bring up the local control-plane stack:
+One command brings up the entire stack (Postgres, NATS, MinIO, MLflow, Dagster, Prometheus, Grafana, Loki), runs database migrations, and initializes MinIO buckets:
 
 ```bash
-cp .env.example .env
-./scripts/dev_up.sh
-export DATABASE_URL=postgresql://rfpose:rfpose@localhost:5432/rfpose
-./scripts/run_migrations.sh
-export MINIO_ENDPOINT=http://localhost:9000
-export MINIO_ROOT_USER=rfpose
-export MINIO_ROOT_PASSWORD=rfpose-secret
-export S3_BUCKET=rfpose
-./scripts/init_minio.sh
+make up
 ```
 
-Run the gateway and send synthetic CSI:
+Or equivalently:
+
+```bash
+./scripts/dev_up.sh
+```
+
+All credentials are centralized in a single `.env` file (auto-created from `.env.example` on first run).
+
+### Services & credentials
+
+| Service | URL | Credentials |
+| --- | --- | --- |
+| API (Swagger) | http://localhost:8080/docs | — |
+| MLflow | http://localhost:5000 | — |
+| Dagster | http://localhost:3004 | — |
+| MinIO Console | http://localhost:9003 | `rfpose` / `rfpose-secret` |
+| Grafana | http://localhost:3002 | `admin` / `admin` |
+| Prometheus | http://localhost:9090 | — |
+| NATS Monitor | http://localhost:8222 | — |
+| PostgreSQL | localhost:5432 | `rfpose` / `rfpose` |
+
+### Useful commands
+
+```bash
+make up      # Start the stack
+make down    # Stop the stack (data preserved)
+make ps      # Show container status
+make logs    # Tail logs from all services
+```
+
+To reset all data and start fresh:
+
+```bash
+docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down -v
+make up
+```
+
+## Gateway smoke test
+
+Once the stack is running, build and run the Rust gateway in a separate terminal:
 
 ```bash
 cd gateway/rf-gateway
@@ -115,31 +156,42 @@ AWS_SECRET_ACCESS_KEY=rfpose-secret \
 cargo run
 ```
 
+Send synthetic CSI packets from another terminal:
+
 ```bash
 python tools/mock_sender/send_mock_csi.py --node-id 1 --count 100
+```
+
+After ~30 seconds the gateway uploads a Bronze batch to MinIO — check the MinIO Console at http://localhost:9003 under `rfpose/bronze/`.
+
+## ETL & training smoke test
+
+Run the full pipeline end-to-end (Bronze → Silver → Gold → Train → Eval → Gate):
+
+```bash
+bash scripts/validate_etl.sh
 ```
 
 ## Validation
 
 ```bash
-make -C firmware/esp32-csi-node/test check
-cargo test --manifest-path gateway/rf-gateway/Cargo.toml
+make -C firmware/esp32-csi-node/test check          # Firmware packet test (C)
+cargo test --manifest-path gateway/rf-gateway/Cargo.toml  # Gateway tests (Rust)
 python -m compileall services/api/src pipelines/dagster/rfpose_pipelines ml/rfpose
 PYTHONPATH=helios_runner python helios_runner/test_dry_run.py
-npm --prefix dashboard run build
+npm --prefix dashboard run build                     # Dashboard build check
 ```
 
 ## Documentation
 
-Start with the documentation index:
-
-- [`docs/index.md`](docs/index.md)
-- [`docs/final-architecture.md`](docs/final-architecture.md)
-- [`docs/runbook.md`](docs/runbook.md)
-- [`docs/deployment.md`](docs/deployment.md)
-- [`docs/security.md`](docs/security.md)
-- [`docs/mlops.md`](docs/mlops.md)
-- [`docs/helios.md`](docs/helios.md)
+- [`docs/system-overview-vi.md`](docs/system-overview-vi.md) — Chi tiết hệ thống (tiếng Việt)
+- [`docs/final-architecture.md`](docs/final-architecture.md) — Production architecture
+- [`docs/runbook.md`](docs/runbook.md) — Operations runbook
+- [`docs/deployment.md`](docs/deployment.md) — Deployment guide
+- [`docs/security.md`](docs/security.md) — Security posture
+- [`docs/mlops.md`](docs/mlops.md) — MLOps lifecycle
+- [`docs/helios.md`](docs/helios.md) — Helios GH200 HPC
+- [`docs/index.md`](docs/index.md) — Full documentation index
 
 ## Production readiness status
 
