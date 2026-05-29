@@ -9,4 +9,5 @@ dependencies = [
     "pydantic-settings",
     "psycopg[binary]",
     "psycopg-pool",
+    "paramiko",
 ]

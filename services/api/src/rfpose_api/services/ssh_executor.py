@@ -1,11 +1,17 @@
-"""Unified SSH / Slurm executor — consolidates all HPC remote operations."""
+"""Unified SSH / Slurm executor — uses paramiko instead of ssh binary."""
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shlex
-import subprocess
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
+
+import paramiko
+
+log = logging.getLogger(__name__)
 
 TEMPLATE = (
     Path(__file__).resolve().parents[4]
@@ -31,11 +37,36 @@ class HpcJobSpec:
     git_branch: str = "main"
 
 
-def _ssh_opts(ssh_key: str = "") -> list[str]:
-    opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
-    if ssh_key:
-        opts += ["-i", ssh_key]
-    return opts
+def _connect(login: str, ssh_key: str = "", timeout: int = 15) -> paramiko.SSHClient:
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    parts = login.split("@", 1)
+    if len(parts) == 2:
+        user, host = parts
+    else:
+        user, host = "root", parts[0]
+
+    kwargs: dict = {"hostname": host, "username": user, "timeout": timeout}
+    if ssh_key and os.path.isfile(ssh_key):
+        kwargs["key_filename"] = ssh_key
+    else:
+        password = os.environ.get("HPC_PASSWORD", "")
+        if password:
+            kwargs["password"] = password
+
+    ssh.connect(**kwargs)
+    return ssh
+
+
+def _exec(ssh: paramiko.SSHClient, cmd: str, timeout: int = 30) -> str:
+    _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+    out = stdout.read().decode().strip()
+    err = stderr.read().decode().strip()
+    exit_code = stdout.channel.recv_exit_status()
+    if exit_code != 0 and err:
+        log.warning("cmd=%s exit=%d stderr=%s", cmd[:80], exit_code, err[:200])
+    return out
 
 
 def render_sbatch(spec: HpcJobSpec) -> str:
@@ -66,106 +97,83 @@ def submit_training_job(
     remote_dir: str = "~/rfpose-jobs",
     dry_run: bool = False,
 ) -> str:
-    script_name = f"{spec.job_id}.sbatch"
     rendered = render_sbatch(spec)
     if dry_run:
         return rendered
-    opts = _ssh_opts(ssh_key)
-    local_tmp = Path(os.environ.get("TMPDIR", "/tmp")) / script_name
-    local_tmp.write_text(rendered)
-    subprocess.run(
-        ["ssh", *opts, login, "mkdir", "-p", remote_dir, f"{remote_dir}/logs"],
-        check=True,
-        timeout=30,
-    )
-    subprocess.run(
-        ["scp", *opts, str(local_tmp), f"{login}:{remote_dir}/{script_name}"],
-        check=True,
-        timeout=60,
-    )
-    cmd = f"cd {shlex.quote(remote_dir)} && sbatch --parsable {shlex.quote(script_name)}"
-    return subprocess.check_output(
-        ["ssh", *opts, login, cmd], text=True, timeout=30
-    ).strip()
+
+    script_name = f"{spec.job_id}.sbatch"
+    ssh = _connect(login, ssh_key)
+    try:
+        _exec(ssh, f"mkdir -p {remote_dir} {remote_dir}/logs")
+        sftp = ssh.open_sftp()
+        remote_path = f"{remote_dir}/{script_name}"
+        with sftp.file(remote_path, "w") as f:
+            f.write(rendered)
+        sftp.close()
+        return _exec(ssh, f"cd {shlex.quote(remote_dir)} && sbatch --parsable {shlex.quote(script_name)}")
+    finally:
+        ssh.close()
 
 
 def submit_script(
     *, login: str, ssh_key: str = "", remote_dir: str, script_name: str
 ) -> str:
-    opts = _ssh_opts(ssh_key)
-    cmd = f"cd {shlex.quote(remote_dir)} && sbatch --parsable {shlex.quote(script_name)}"
-    return subprocess.check_output(
-        ["ssh", *opts, login, cmd], text=True, timeout=30
-    ).strip()
+    ssh = _connect(login, ssh_key)
+    try:
+        return _exec(ssh, f"cd {shlex.quote(remote_dir)} && sbatch --parsable {shlex.quote(script_name)}")
+    finally:
+        ssh.close()
 
 
 def test_connection(login: str, ssh_key: str = "") -> dict:
-    opts = _ssh_opts(ssh_key)
+    if not login:
+        return {"ok": False, "error": "HPC_LOGIN not configured"}
     try:
-        host = subprocess.check_output(
-            ["ssh", *opts, login, "hostname"], text=True, timeout=15
-        ).strip()
-        queue = subprocess.check_output(
-            [
-                "ssh",
-                *opts,
-                login,
-                "squeue -u $USER --format='%.8i %.9P %.20j %.2t %.10M' --noheader 2>/dev/null | head -5",
-            ],
-            text=True,
-            timeout=15,
-        ).strip()
+        ssh = _connect(login, ssh_key)
+        host = _exec(ssh, "hostname")
+        queue = _exec(ssh, "squeue -u $USER --format='%.8i %.9P %.20j %.2t %.10M' --noheader 2>/dev/null | head -5")
+        ssh.close()
         return {"ok": True, "hostname": host, "queue_preview": queue}
-    except subprocess.TimeoutExpired:
+    except paramiko.AuthenticationException:
+        return {"ok": False, "error": "SSH authentication failed — check credentials"}
+    except paramiko.SSHException as exc:
+        return {"ok": False, "error": f"SSH error: {exc}"}
+    except TimeoutError:
         return {"ok": False, "error": "SSH connection timed out (15s)"}
-    except subprocess.CalledProcessError as exc:
-        return {
-            "ok": False,
-            "error": f"SSH failed (exit {exc.returncode}): {exc.stderr or exc.stdout or ''}",
-        }
-    except FileNotFoundError:
-        return {"ok": False, "error": "ssh binary not found on this system"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def list_remote_scripts(
     login: str, ssh_key: str = "", remote_dir: str = ""
 ) -> list[str]:
-    if not remote_dir:
+    if not remote_dir or not login:
         return []
-    opts = _ssh_opts(ssh_key)
     try:
-        out = subprocess.check_output(
-            [
-                "ssh",
-                *opts,
-                login,
-                f"ls {shlex.quote(remote_dir)}/*.sh {shlex.quote(remote_dir)}/*.sbatch 2>/dev/null",
-            ],
-            text=True,
-            timeout=15,
-        ).strip()
+        ssh = _connect(login, ssh_key)
+        out = _exec(ssh, f"ls {shlex.quote(remote_dir)}/*.sh {shlex.quote(remote_dir)}/*.sbatch 2>/dev/null")
+        ssh.close()
         return [Path(f).name for f in out.splitlines() if f.strip()]
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except Exception:
         return []
-
-
-# ── Slurm status queries ──────────────────────────────────
 
 
 def slurm_status(login: str, slurm_job_id: str, *, ssh_key: str = "") -> str:
-    cmd = f"sacct -j {slurm_job_id} --format=JobID,State,Elapsed,ExitCode --parsable2 --noheader | head -1"
-    return subprocess.check_output(
-        ["ssh", *_ssh_opts(ssh_key), login, cmd], text=True, timeout=15
-    ).strip()
+    ssh = _connect(login, ssh_key)
+    try:
+        cmd = f"sacct -j {slurm_job_id} --format=JobID,State,Elapsed,ExitCode --parsable2 --noheader | head -1"
+        return _exec(ssh, cmd)
+    finally:
+        ssh.close()
 
 
 def slurm_job_detail(login: str, slurm_job_id: str, *, ssh_key: str = "") -> dict:
     fmt = "JobID,State,Elapsed,ExitCode,Start,End,MaxRSS,MaxVMSize,TotalCPU,NodeList"
     cmd = f"sacct -j {slurm_job_id} --format={fmt} --parsable2 --noheader | head -1"
     try:
-        raw = subprocess.check_output(
-            ["ssh", *_ssh_opts(ssh_key), login, cmd], text=True, timeout=15
-        ).strip()
+        ssh = _connect(login, ssh_key)
+        raw = _exec(ssh, cmd)
+        ssh.close()
         parts = raw.split("|")
         keys = fmt.split(",")
         return dict(zip(keys, parts)) if len(parts) >= len(keys) else {"raw": raw}
@@ -181,29 +189,24 @@ def fetch_slurm_logs(
     remote_dir: str = "~/rfpose-jobs",
     tail: int = 100,
 ) -> dict:
-    opts = _ssh_opts(ssh_key)
     result: dict[str, str] = {"stdout": "", "stderr": ""}
-    for suffix, key in [("out", "stdout"), ("err", "stderr")]:
-        cmd = (
-            f"tail -n {tail} {shlex.quote(remote_dir)}/logs/*{slurm_job_id}.{suffix} "
-            f"2>/dev/null || echo '(no log file found)'"
-        )
-        try:
-            out = subprocess.check_output(
-                ["ssh", *opts, login, cmd], text=True, timeout=15
-            ).strip()
-            result[key] = out
-        except Exception as exc:
-            result[key] = f"(fetch failed: {exc})"
+    try:
+        ssh = _connect(login, ssh_key)
+        for suffix, key in [("out", "stdout"), ("err", "stderr")]:
+            cmd = (
+                f"tail -n {tail} {shlex.quote(remote_dir)}/logs/*{slurm_job_id}.{suffix} "
+                f"2>/dev/null || echo '(no log file found)'"
+            )
+            result[key] = _exec(ssh, cmd)
+        ssh.close()
+    except Exception as exc:
+        result["stdout"] = f"(fetch failed: {exc})"
     return result
 
 
-# ── Job cancellation ───────────────────────────────────────
-
-
 def cancel_job(login: str, slurm_job_id: str, *, ssh_key: str = "") -> None:
-    subprocess.run(
-        ["ssh", *_ssh_opts(ssh_key), login, f"scancel {slurm_job_id}"],
-        check=True,
-        timeout=15,
-    )
+    ssh = _connect(login, ssh_key)
+    try:
+        _exec(ssh, f"scancel {slurm_job_id}")
+    finally:
+        ssh.close()
