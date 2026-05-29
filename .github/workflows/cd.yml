@@ -10,23 +10,25 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: root
-          password: ${{ secrets.VPS_PASSWORD }}
-          command_timeout: 10m
-          script: |
-            set -e
-            echo "=== Pulling latest code ==="
-            cd /opt/rfpose/rf-worldpose
-            git fetch origin main
-            git reset --hard origin/main
-            echo "=== Deploying services ==="
-            cd infra/docker-compose
-            docker compose up -d --force-recreate --remove-orphans 2>&1
-            echo "=== Waiting for startup ==="
-            sleep 15
-            docker compose ps
-            echo "=== Deploy complete ==="
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@"$VPS_HOST" << 'DEPLOY'
+          set -e
+          echo "=== Pulling latest code ==="
+          cd /opt/rfpose/rf-worldpose
+          git fetch origin main
+          git reset --hard origin/main
+          echo "=== Deploying services ==="
+          cd infra/docker-compose
+          docker compose up -d --force-recreate --remove-orphans 2>&1
+          echo "=== Waiting for startup ==="
+          sleep 15
+          docker compose ps
+          echo "=== Deploy complete ==="
+          DEPLOY
