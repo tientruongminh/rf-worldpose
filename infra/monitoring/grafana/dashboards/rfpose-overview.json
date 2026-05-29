@@ -1,0 +1,58 @@
+{
+  "dashboard": {
+    "title": "RF-WorldPose Overview",
+    "uid": "rfpose-overview",
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": { "from": "now-1h", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Services Up",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+        "targets": [{ "expr": "up", "legendFormat": "{{job}}", "datasource": "Prometheus" }],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+            ]
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "API Request Rate",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+        "targets": [{ "expr": "rate(http_requests_total[5m])", "legendFormat": "{{method}} {{handler}}", "datasource": "Prometheus" }]
+      },
+      {
+        "id": 3,
+        "title": "NATS Connections",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+        "targets": [{ "expr": "gnatsd_connz_num_connections", "legendFormat": "connections", "datasource": "Prometheus" }]
+      },
+      {
+        "id": 4,
+        "title": "NATS Messages In/Out",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+        "targets": [
+          { "expr": "rate(gnatsd_varz_in_msgs[5m])", "legendFormat": "msgs in/s", "datasource": "Prometheus" },
+          { "expr": "rate(gnatsd_varz_out_msgs[5m])", "legendFormat": "msgs out/s", "datasource": "Prometheus" }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Container Logs",
+        "type": "logs",
+        "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+        "targets": [{ "expr": "{job=~\".+\"}", "datasource": "Loki" }],
+        "options": { "showTime": true, "sortOrder": "Descending" }
+      }
+    ]
+  },
+  "overwrite": true
+}
