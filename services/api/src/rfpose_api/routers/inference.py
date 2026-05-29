@@ -1,11 +1,14 @@
-"""Inference API — receive CSI data, return predictions using deployed ONNX model."""
+"""Inference API — receive CSI data, return predictions using deployed ONNX model.
+
+numpy and onnxruntime are imported lazily so the API starts even when they
+are not installed (e.g. lightweight containers that only serve the portal).
+"""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -46,6 +49,9 @@ def _get_session():
         _session = ort.InferenceSession(str(model_path))
         log.info("Loaded ONNX model: %s", model_path)
         return _session
+    except ImportError:
+        log.warning("onnxruntime not installed — inference unavailable")
+        return None
     except Exception as exc:
         log.warning("Failed to load ONNX model: %s", exc)
         return None
@@ -56,10 +62,17 @@ def inference_status():
     model_path = MODEL_DIR / "model.onnx"
     session = _get_session()
 
+    np_ok = True
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        np_ok = False
+
     result: dict[str, Any] = {
         "model_dir": str(MODEL_DIR),
         "model_exists": model_path.exists(),
         "model_loaded": session is not None,
+        "numpy_installed": np_ok,
     }
 
     if session:
@@ -75,6 +88,11 @@ def inference_status():
 
 @router.post("/predict", response_model=PredictionResult)
 def predict(payload: CSIInput):
+    try:
+        import numpy as np
+    except ImportError:
+        raise HTTPException(503, "numpy not installed in this environment.")
+
     session = _get_session()
     if session is None:
         raise HTTPException(
@@ -94,7 +112,8 @@ def predict(payload: CSIInput):
 
         logits = outputs[0]
         if logits.ndim >= 2:
-            probs = _softmax(logits[0])
+            e = np.exp(logits[0] - np.max(logits[0]))
+            probs = e / e.sum()
             action_id = int(np.argmax(probs))
             result.action_id = action_id
             result.confidence = float(probs[action_id])
@@ -107,6 +126,8 @@ def predict(payload: CSIInput):
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(500, f"Inference failed: {exc}")
 
@@ -120,8 +141,3 @@ def reload_model():
     if session:
         return {"status": "reloaded", "model": "model.onnx"}
     raise HTTPException(503, "No model found to reload.")
-
-
-def _softmax(x):
-    e = np.exp(x - np.max(x))
-    return e / e.sum()
