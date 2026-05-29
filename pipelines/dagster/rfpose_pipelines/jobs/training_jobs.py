@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from dagster import job, op, In, Out, Output, OpExecutionContext
+from dagster import job, op, In, Out, Output
 
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://rfpose:rfpose@postgres:5432/rfpose")
 
@@ -21,7 +21,7 @@ def _get_db():
 
 
 @op(out={"configs": Out(list)})
-def load_training_configs(context: OpExecutionContext):
+def load_training_configs(context):
     """Fetch active training configs from the registry that match the current dataset."""
     dataset_version = os.environ.get("RFPOSE_DATASET_VERSION", "")
     with _get_db() as conn, conn.cursor() as cur:
@@ -39,7 +39,7 @@ def load_training_configs(context: OpExecutionContext):
 
 
 @op(ins={"configs": In(list)})
-def submit_hpc_jobs(context: OpExecutionContext, configs: list):
+def submit_hpc_jobs(context, configs: list):
     """Render sbatch for each config and submit to HPC via SSH."""
     hpc_login = os.environ.get("HPC_LOGIN", "")
     hpc_user = os.environ.get("HPC_USER", "")
