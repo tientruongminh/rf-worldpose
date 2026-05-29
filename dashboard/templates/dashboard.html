@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+  <h2 style="font-size:1.5rem; font-weight:700;">Training Jobs</h2>
+  <a href="/submit" class="btn btn-primary">+ New Job</a>
+</div>
+
+<div class="grid-3 mb-6">
+  <div class="card stat-card">
+    <div class="number" style="color:var(--c-accent);">{{ stats.total }}</div>
+    <div class="label">Total Jobs</div>
+  </div>
+  <div class="card stat-card">
+    <div class="number" style="color:var(--c-green);">{{ stats.running }}</div>
+    <div class="label">Running</div>
+  </div>
+  <div class="card stat-card">
+    <div class="number" style="color:var(--c-amber);">{{ stats.submitted }}</div>
+    <div class="label">Queued</div>
+  </div>
+</div>
+
+<div class="card" style="padding:0; overflow:hidden;">
+  <div style="padding:1rem 1.5rem; border-bottom:1px solid var(--c-border);"
+       class="flex justify-between items-center">
+    <span class="text-sm text-muted">
+      {% if filter_status %}Filtered: <span class="badge badge-{{ filter_status }}">{{ filter_status }}</span>{% else %}All jobs{% endif %}
+      &mdash; {{ jobs | length }} shown
+    </span>
+    <div class="flex gap-2">
+      <a href="/portal" class="btn btn-ghost btn-sm {% if not filter_status %}btn-primary{% endif %}">All</a>
+      <a href="/portal?status=submitted" class="btn btn-ghost btn-sm">Queued</a>
+      <a href="/portal?status=running" class="btn btn-ghost btn-sm">Running</a>
+      <a href="/portal?status=completed" class="btn btn-ghost btn-sm">Done</a>
+      <a href="/portal?status=failed" class="btn btn-ghost btn-sm">Failed</a>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Job ID</th>
+        <th>Dataset</th>
+        <th>Config</th>
+        <th>Status</th>
+        <th>Slurm</th>
+        <th>By</th>
+        <th>Created</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td><a href="/jobs/{{ job.id }}">{{ job.id[:20] }}{% if job.id|length > 20 %}&hellip;{% endif %}</a></td>
+        <td class="text-sm">{{ job.dataset_version[:16] }}{% if job.dataset_version|length > 16 %}&hellip;{% endif %}</td>
+        <td class="text-sm text-muted">{{ job.train_config[:20] }}{% if job.train_config|length > 20 %}&hellip;{% endif %}</td>
+        <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+        <td class="text-sm text-muted">{{ job.slurm_job_id or '—' }}</td>
+        <td class="text-sm">{{ job.submitted_by or '—' }}</td>
+        <td class="text-sm text-muted">{{ job.created_at.strftime('%m/%d %H:%M') if job.created_at else '—' }}</td>
+        <td>
+          <a href="/jobs/{{ job.id }}" class="btn btn-ghost btn-sm">View</a>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not jobs %}
+      <tr>
+        <td colspan="8" style="text-align:center; padding:2rem; color:var(--c-muted);">
+          No training jobs found. <a href="/submit">Submit your first job</a>.
+        </td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

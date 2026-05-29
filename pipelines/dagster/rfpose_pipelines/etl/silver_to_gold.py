@@ -1,7 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
 import json
-import numpy as np
 
 try:
     import polars as pl
@@ -26,6 +25,8 @@ def silver_to_gold(
     stride: int = 10,
     num_classes: int = 6,
 ) -> dict:
+    import numpy as np
+
     rows = load_silver(silver_path)
     rows = [r for r in rows if r.get('amplitude')]
     rows.sort(key=lambda r: (int(r['timestamp_us']), int(r['node_id'])))

@@ -89,9 +89,12 @@ services:
     environment:
       <<: [*db-url, *s3-env]
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      HELIOS_LOGIN: ${HELIOS_LOGIN}
-      HELIOS_ACCOUNT: ${HELIOS_ACCOUNT}
-      HELIOS_PARTITION: ${HELIOS_PARTITION}
+      HPC_LOGIN: ${HPC_LOGIN:-}
+      HPC_USER: ${HPC_USER:-}
+      HPC_SSH_KEY: ${HPC_SSH_KEY:-}
+      HPC_ACCOUNT: ${HPC_ACCOUNT:-}
+      HPC_PARTITION: ${HPC_PARTITION:-}
+      HPC_WORK_DIR: ${HPC_WORK_DIR:-~/rfpose-jobs}
     ports: ["8080:8080"]
     volumes: ["../../:/app"]
     depends_on:
@@ -114,6 +117,46 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+
+  inference:
+    image: python:3.11-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install --quiet -e services/inference[all] 2>/dev/null;
+             pip install --quiet onnxruntime numpy nats-py fastapi uvicorn pydantic &&
+             cd services/inference/src &&
+             uvicorn rfpose_inference.main:app --host 0.0.0.0 --port 8081"
+    environment:
+      NATS_URL: nats://nats:4222
+      MODEL_DIR: /models
+      RFPOSE_DEPLOYMENT_ID: room01
+      WINDOW_SIZE: "30"
+      N_NODES: "9"
+      <<: *s3-env
+    ports: ["8081:8081"]
+    volumes:
+      - "../../:/app"
+      - "model-data:/models"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  portal:
+    image: python:3.11-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install --quiet -e dashboard &&
+             uvicorn rfpose_portal.main:app --host 0.0.0.0 --port 8082"
+    environment:
+      API_BASE_URL: http://api:8080
+      INFERENCE_URL: http://inference:8081
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DAGSTER_URL: http://dagster:3001
+    ports: ["8082:8082"]
+    volumes: ["../../:/app"]
+    depends_on:
+      api:
+        condition: service_started
 
   dagster:
     image: python:3.11-slim
@@ -158,3 +201,4 @@ volumes:
   minio-data:
   mlflow-data:
   grafana-data:
+  model-data:

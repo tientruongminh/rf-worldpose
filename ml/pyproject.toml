@@ -5,4 +5,6 @@ requires-python = ">=3.11"
 dependencies = ["torch", "numpy", "scikit-learn", "hydra-core", "mlflow", "onnx", "onnxscript"]
 
 [tool.setuptools]
-packages = ["rfpose", "rfpose.data", "rfpose.models", "rfpose.training", "rfpose.evaluation", "rfpose.export", "rfpose.utils"]
+packages = ["rfpose", "rfpose.data", "rfpose.models", "rfpose.training", "rfpose.evaluation", "rfpose.export", "rfpose.packaging"]
+package-dir = {"" = "."}
+
