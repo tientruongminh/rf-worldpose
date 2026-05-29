@@ -109,6 +109,7 @@ services:
         --host 0.0.0.0 --port 5000
         --backend-store-uri sqlite:////mlflow/mlflow.db
         --default-artifact-root s3://${S3_BUCKET}/mlflow
+        --allowed-hosts all
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
