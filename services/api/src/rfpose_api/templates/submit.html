@@ -56,7 +56,7 @@
     <div>
       <label for="backend">Backend</label>
       <select id="backend" name="backend">
-        <option value="helios-slurm">Helios Slurm (GH200)</option>
+        <option value="eagle-slurm">Eagle PCSS (Slurm)</option>
       </select>
     </div>
     <div>
@@ -66,7 +66,7 @@
           <input type="checkbox" name="auto_submit" value="1"
                  {% if form and form.auto_submit %}checked{% endif %}
                  style="width:auto;">
-          Auto-submit to Helios after creation
+          Auto-submit to Eagle after creation
         </label>
         <label style="text-transform:none; font-weight:normal; display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
           <input type="checkbox" name="dry_run" value="1"
