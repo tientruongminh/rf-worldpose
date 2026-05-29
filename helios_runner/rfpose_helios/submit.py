@@ -19,6 +19,9 @@ class HeliosJobSpec:
     s3_endpoint_url: str = "http://minio:9000"
     mlflow_tracking_uri: str = "http://mlflow:5000"
     time_limit: str = "24:00:00"
+    script_path: str = ""
+    git_repo: str = ""
+    git_branch: str = "main"
 
 
 def render_sbatch(spec: HeliosJobSpec) -> str:
@@ -32,6 +35,9 @@ def render_sbatch(spec: HeliosJobSpec) -> str:
         "{{ s3_bucket }}": spec.s3_bucket,
         "{{ s3_endpoint_url }}": spec.s3_endpoint_url,
         "{{ mlflow_tracking_uri }}": spec.mlflow_tracking_uri,
+        "{{ script_path }}": spec.script_path or "training/train.py",
+        "{{ git_repo }}": spec.git_repo or "https://github.com/tientruongminh/rf-worldpose",
+        "{{ git_branch }}": spec.git_branch or "main",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)

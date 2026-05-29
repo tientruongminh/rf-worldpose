@@ -32,38 +32,21 @@ STATUS_MAP = {
     "TIMEOUT": "failed", "OUT_OF_MEMORY": "failed", "NODE_FAIL": "failed",
 }
 
-TRAINING_PRESETS = [
-    {
-        "id": "wipose-action-baseline",
-        "label": "Wi-Pose Action Recognition (baseline)",
-        "config": "epochs=50\nbatch_size=128\nlr=3e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=5\nnum_classes=12\nnum_keypoints=18",
-        "dataset_hint": "wipose-v1",
-    },
-    {
-        "id": "wipose-pose2d",
-        "label": "Wi-Pose 2D Pose Estimation",
-        "config": "epochs=80\nbatch_size=64\nlr=1e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=5\nnum_classes=12\nnum_keypoints=18\npose_weight=1.0",
-        "dataset_hint": "wipose-v1",
-    },
-    {
-        "id": "wiar-action-baseline",
-        "label": "WiAR 16-Activity Recognition (baseline)",
-        "config": "epochs=50\nbatch_size=128\nlr=3e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=1\nnum_classes=16",
-        "dataset_hint": "wiar-v1",
-    },
-    {
-        "id": "wiar-action-lora",
-        "label": "WiAR LoRA Fine-tune",
-        "config": "epochs=30\nbatch_size=64\nlr=1e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=1\nnum_classes=16\nlora_rank=8\nlora_alpha=16",
-        "dataset_hint": "wiar-v1",
-    },
-    {
-        "id": "custom",
-        "label": "Custom config (type below)",
-        "config": "",
-        "dataset_hint": "",
-    },
-]
+def _list_configs():
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM training_configs ORDER BY created_at ASC")
+            rows = cur.fetchall()
+            rows.append({
+                "id": "custom", "label": "Custom config (type below)",
+                "hyperparams": "", "dataset_hint": "", "script_path": "",
+                "git_repo": "", "git_branch": "", "description": "",
+            })
+            return rows
+    except Exception:
+        return [{"id": "custom", "label": "Custom config (type below)",
+                 "hyperparams": "", "dataset_hint": "", "script_path": "",
+                 "git_repo": "", "git_branch": "", "description": ""}]
 
 
 def _render(request: Request, name: str, ctx: dict):
@@ -143,7 +126,7 @@ def quick_submit(request: Request, script_name: str = Form(...), submitted_by: s
 def submit_form(request: Request):
     datasets = _list_datasets()
     return _render(request, "submit.html", {
-        "datasets": datasets, "presets": TRAINING_PRESETS,
+        "datasets": datasets, "presets": _list_configs(),
         "form": None, "error": None, "dry_run_result": None,
     })
 
@@ -156,6 +139,7 @@ def submit_job(
     dataset_version: str = Form(""),
     dataset_version_manual: str = Form(""),
     train_config: str = Form(...),
+    preset_id: str = Form(""),
     backend: str = Form("eagle-slurm"),
     auto_submit: str = Form(""),
     dry_run: str = Form(""),
@@ -167,9 +151,18 @@ def submit_job(
         "train_config": train_config, "auto_submit": auto_submit,
     }
 
+    preset_config = None
+    if preset_id and preset_id != "custom":
+        try:
+            with connect() as conn, conn.cursor() as cur:
+                cur.execute("SELECT * FROM training_configs WHERE id=%s", (preset_id,))
+                preset_config = cur.fetchone()
+        except Exception:
+            pass
+
     if not ds:
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "datasets": _list_datasets(), "presets": _list_configs(),
             "form": form_data,
             "error": "Please select or type a dataset version.", "dry_run_result": None,
         })
@@ -186,13 +179,13 @@ def submit_job(
     except Exception as exc:
         log.warning("create job failed: %s", exc)
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "datasets": _list_datasets(), "presets": _list_configs(),
             "form": form_data,
             "error": f"Failed to create job: {exc}", "dry_run_result": None,
         })
 
     if auto_submit or dry_run:
-        return _try_submit(request, job, dry_run=bool(dry_run))
+        return _try_submit(request, job, dry_run=bool(dry_run), preset_config=preset_config)
 
     return RedirectResponse(f"/portal/jobs/{job_id}", status_code=303)
 
@@ -285,6 +278,119 @@ def connection_test_web(request: Request):
     return HTMLResponse(html)
 
 
+# ── Config Registry ──────────────────────────────────────────
+
+@router.get("/configs")
+def configs_list(request: Request):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM training_configs ORDER BY created_at ASC")
+        configs = cur.fetchall()
+    return _render(request, "configs.html", {"configs": configs})
+
+
+@router.get("/configs/new")
+def config_new_form(request: Request):
+    datasets = _list_datasets()
+    return _render(request, "config_form.html", {
+        "datasets": datasets, "config": None, "error": None, "editing": False,
+    })
+
+
+@router.post("/configs/new")
+def config_create(
+    request: Request,
+    config_id: str = Form(...),
+    label: str = Form(...),
+    description: str = Form(""),
+    script_path: str = Form("training/train.py"),
+    git_repo: str = Form("https://github.com/tientruongminh/rf-worldpose"),
+    git_branch: str = Form("main"),
+    dataset_hint: str = Form(""),
+    hyperparams: str = Form(""),
+    requirements: str = Form("torch mlflow numpy h5py"),
+    created_by: str = Form("system"),
+):
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO training_configs
+                   (id, label, description, script_path, git_repo, git_branch,
+                    dataset_hint, hyperparams, requirements, created_by)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (config_id, label, description, script_path, git_repo, git_branch,
+                 dataset_hint, hyperparams, requirements, created_by),
+            )
+        return RedirectResponse("/portal/configs", status_code=303)
+    except Exception as exc:
+        return _render(request, "config_form.html", {
+            "datasets": _list_datasets(),
+            "config": {
+                "id": config_id, "label": label, "description": description,
+                "script_path": script_path, "git_repo": git_repo, "git_branch": git_branch,
+                "dataset_hint": dataset_hint, "hyperparams": hyperparams,
+                "requirements": requirements, "created_by": created_by,
+            },
+            "error": str(exc), "editing": False,
+        })
+
+
+@router.get("/configs/{config_id}/edit")
+def config_edit_form(request: Request, config_id: str):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM training_configs WHERE id=%s", (config_id,))
+        config = cur.fetchone()
+    if not config:
+        return RedirectResponse("/portal/configs", status_code=303)
+    return _render(request, "config_form.html", {
+        "datasets": _list_datasets(), "config": config, "error": None, "editing": True,
+    })
+
+
+@router.post("/configs/{config_id}/edit")
+def config_update(
+    request: Request,
+    config_id: str,
+    label: str = Form(...),
+    description: str = Form(""),
+    script_path: str = Form("training/train.py"),
+    git_repo: str = Form("https://github.com/tientruongminh/rf-worldpose"),
+    git_branch: str = Form("main"),
+    dataset_hint: str = Form(""),
+    hyperparams: str = Form(""),
+    requirements: str = Form("torch mlflow numpy h5py"),
+    created_by: str = Form("system"),
+):
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """UPDATE training_configs
+                   SET label=%s, description=%s, script_path=%s, git_repo=%s, git_branch=%s,
+                       dataset_hint=%s, hyperparams=%s, requirements=%s, created_by=%s, updated_at=now()
+                   WHERE id=%s""",
+                (label, description, script_path, git_repo, git_branch,
+                 dataset_hint, hyperparams, requirements, created_by, config_id),
+            )
+        return RedirectResponse("/portal/configs", status_code=303)
+    except Exception as exc:
+        return _render(request, "config_form.html", {
+            "datasets": _list_datasets(),
+            "config": {
+                "id": config_id, "label": label, "description": description,
+                "script_path": script_path, "git_repo": git_repo, "git_branch": git_branch,
+                "dataset_hint": dataset_hint, "hyperparams": hyperparams,
+                "requirements": requirements, "created_by": created_by,
+            },
+            "error": str(exc), "editing": True,
+        })
+
+
+@router.post("/configs/{config_id}/delete")
+def config_delete(request: Request, config_id: str):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM training_configs WHERE id=%s", (config_id,))
+    return RedirectResponse("/portal/configs", status_code=303)
+
+
 # ── Helpers ─────────────────────────────────────────────────
 
 def _get_job(job_id: str):
@@ -308,7 +414,7 @@ def _job_fragment(request: Request, job, *, message=None, message_type="success"
     })
 
 
-def _try_submit(request: Request, job, *, dry_run: bool):
+def _try_submit(request: Request, job, *, dry_run: bool, preset_config: dict | None = None):
     spec = HeliosJobSpec(
         job_id=job["id"],
         dataset_version=job["dataset_version"],
@@ -318,6 +424,9 @@ def _try_submit(request: Request, job, *, dry_run: bool):
         s3_bucket=settings.s3_bucket,
         s3_endpoint_url=settings.s3_endpoint_url,
         mlflow_tracking_uri=settings.mlflow_tracking_uri,
+        script_path=preset_config["script_path"] if preset_config else "",
+        git_repo=preset_config["git_repo"] if preset_config else "",
+        git_branch=preset_config["git_branch"] if preset_config else "main",
     )
 
     try:
@@ -332,7 +441,7 @@ def _try_submit(request: Request, job, *, dry_run: bool):
 
     if dry_run:
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "datasets": _list_datasets(), "presets": _list_configs(),
             "form": None, "error": None, "dry_run_result": result,
         })
 

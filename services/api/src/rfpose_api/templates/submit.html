@@ -10,44 +10,54 @@
 {% endif %}
 
 <form method="POST" action="/portal/submit" class="card" id="submit-form">
+
   <div class="grid-2 gap-4 mb-4">
     <div>
-      <label for="job_id">Job ID</label>
-      <input type="text" id="job_id" name="job_id" required
-             placeholder="auto-generated below"
-             value="{{ form.job_id if form else '' }}">
-      <p class="text-sm text-muted mt-2" style="cursor:pointer; color:var(--c-accent);"
-         onclick="generateJobId()">Generate ID automatically</p>
+      <label for="preset_select">Training Config (from Registry)</label>
+      <select id="preset_select" name="preset_id" onchange="applyPreset(this.value)"
+              style="font-size:1rem; padding:0.65rem 0.75rem;">
+        <option value="">Select a config preset...</option>
+        {% for p in presets %}
+        <option value="{{ p.id }}"
+                data-hyperparams="{{ p.hyperparams }}"
+                data-dataset="{{ p.dataset_hint }}"
+                data-script="{{ p.script_path }}"
+                data-repo="{{ p.git_repo }}"
+                data-branch="{{ p.git_branch }}"
+                data-label="{{ p.label }}">
+          {{ p.label }}
+        </option>
+        {% endfor %}
+      </select>
+      <p class="text-sm text-muted mt-2">
+        Don't see your config? <a href="/portal/configs/new">Register a new one</a>.
+      </p>
     </div>
     <div>
       <label for="submitted_by">Your Name</label>
-      <select id="submitted_by_select" onchange="document.getElementById('submitted_by').value=this.value">
+      <select id="submitted_by_select" onchange="document.getElementById('submitted_by').value=this.value; generateJobId();"
+              style="font-size:1rem; padding:0.65rem 0.75rem;">
         <option value="">Select team member...</option>
         <option value="ngan">Ngân</option>
         <option value="ngoc">Ngọc</option>
         <option value="huong">Hương</option>
         <option value="tien">Tiền</option>
       </select>
-      <input type="text" id="submitted_by" name="submitted_by" required
-             placeholder="or type your name"
-             value="{{ form.submitted_by if form else '' }}"
-             style="margin-top:0.5rem;">
+      <input type="hidden" id="submitted_by" name="submitted_by" required
+             value="{{ form.submitted_by if form else '' }}">
     </div>
   </div>
 
   <div class="grid-2 gap-4 mb-4">
     <div>
       <label for="dataset_version">Dataset Version</label>
-      <select id="dataset_version" name="dataset_version">
+      <select id="dataset_version" name="dataset_version" onchange="generateJobId()">
         <option value="">Select dataset...</option>
         {% for ds in datasets %}
         <option value="{{ ds.id }}" {% if form and form.dataset_version == ds.id %}selected{% endif %}>
           {{ ds.id }}
         </option>
         {% endfor %}
-        {% if not datasets %}
-        <option value="" disabled>No datasets registered yet</option>
-        {% endif %}
       </select>
       <p class="text-sm text-muted mt-2">Or type a version ID directly:</p>
       <input type="text" name="dataset_version_manual" placeholder="gold-v1.2"
@@ -55,32 +65,33 @@
              style="margin-top:0.25rem;">
     </div>
     <div>
-      <label for="preset_select">Training Config</label>
-      <select id="preset_select" onchange="applyPreset(this.value)"
-              style="margin-bottom:0.5rem;">
-        <option value="">Select a preset config...</option>
-        {% for p in presets %}
-        <option value="{{ p.id }}" data-config="{{ p.config }}" data-dataset="{{ p.dataset_hint }}">
-          {{ p.label }}
-        </option>
-        {% endfor %}
-      </select>
-      <textarea id="train_config" name="train_config" rows="5" required
-                placeholder="epochs=50&#10;batch_size=128&#10;lr=3e-4&#10;num_classes=12">{{ form.train_config if form else '' }}</textarea>
-      <p class="text-sm text-muted mt-2">Preset fills in config automatically. Edit freely below.</p>
+      <label>Config Details <span class="text-muted" style="text-transform:none; font-weight:normal;">(auto-filled from preset)</span></label>
+      <div id="config-preview" class="card" style="padding:0.75rem; font-size:0.8rem; min-height:80px; margin-bottom:0.5rem; border-color:var(--c-border);">
+        <div class="text-muted" style="text-align:center; padding:1rem;">Select a config preset above</div>
+      </div>
+      <textarea id="train_config" name="train_config" rows="4" required
+                placeholder="epochs=50&#10;batch_size=128&#10;lr=3e-4"
+                style="font-size:0.8rem;">{{ form.train_config if form else '' }}</textarea>
+      <p class="text-sm text-muted mt-2">Edit hyperparams above if needed before submitting.</p>
     </div>
   </div>
 
   <div class="grid-2 gap-4 mb-4">
     <div>
+      <label for="job_id">Job ID</label>
+      <input type="text" id="job_id" name="job_id" required
+             placeholder="auto-generated"
+             value="{{ form.job_id if form else '' }}"
+             style="font-size:0.85rem;">
+      <p class="text-sm text-muted mt-2" style="cursor:pointer; color:var(--c-accent);"
+         onclick="generateJobId()">Re-generate ID</p>
+    </div>
+    <div>
       <label for="backend">Backend</label>
       <select id="backend" name="backend">
         <option value="eagle-slurm">Eagle PCSS (Slurm)</option>
       </select>
-    </div>
-    <div>
-      <label>Options</label>
-      <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.5rem;">
+      <div style="display:flex; flex-direction:column; gap:0.5rem; margin-top:0.75rem;">
         <label style="text-transform:none; font-weight:normal; display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
           <input type="checkbox" name="auto_submit" value="1"
                  {% if form and form.auto_submit %}checked{% endif %}
@@ -88,8 +99,7 @@
           Auto-submit to Eagle after creation
         </label>
         <label style="text-transform:none; font-weight:normal; display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
-          <input type="checkbox" name="dry_run" value="1"
-                 style="width:auto;">
+          <input type="checkbox" name="dry_run" value="1" style="width:auto;">
           Dry run (preview sbatch only)
         </label>
       </div>
@@ -97,7 +107,9 @@
   </div>
 
   <div class="flex gap-2 mt-6">
-    <button type="submit" class="btn btn-primary">Create Training Job</button>
+    <button type="submit" class="btn btn-primary" style="font-size:1rem; padding:0.75rem 1.5rem;">
+      Create Training Job
+    </button>
     <a href="/portal" class="btn btn-ghost">Cancel</a>
   </div>
 </form>
@@ -110,32 +122,54 @@
 {% endif %}
 
 <script>
-const PRESETS = {
-  {% for p in presets %}
-  "{{ p.id }}": { config: {{ p.config | tojson }}, dataset: "{{ p.dataset_hint }}" },
-  {% endfor %}
-};
+const PRESETS = {};
+document.querySelectorAll('#preset_select option[data-hyperparams]').forEach(opt => {
+  PRESETS[opt.value] = {
+    hyperparams: opt.dataset.hyperparams,
+    dataset: opt.dataset.dataset,
+    script: opt.dataset.script,
+    repo: opt.dataset.repo,
+    branch: opt.dataset.branch,
+    label: opt.dataset.label,
+  };
+});
 
-function applyPreset(presetId) {
-  const p = PRESETS[presetId];
-  if (!p) return;
-  const configEl = document.getElementById('train_config');
+function applyPreset(pid) {
+  const p = PRESETS[pid];
+  if (!p) {
+    document.getElementById('config-preview').innerHTML =
+      '<div class="text-muted" style="text-align:center; padding:1rem;">Select a config preset above</div>';
+    document.getElementById('train_config').value = '';
+    return;
+  }
+
+  if (p.hyperparams) document.getElementById('train_config').value = p.hyperparams;
+
   const dsEl = document.getElementById('dataset_version');
-  if (p.config) configEl.value = p.config;
   if (p.dataset && dsEl) {
-    for (let opt of dsEl.options) {
+    for (const opt of dsEl.options) {
       if (opt.value === p.dataset) { dsEl.value = p.dataset; break; }
     }
   }
+
+  let preview = '<div style="display:grid; grid-template-columns:100px 1fr; gap:0.25rem 0.5rem;">';
+  if (p.script) preview += `<span class="text-muted">Script:</span><span>${p.script}</span>`;
+  if (p.repo)   preview += `<span class="text-muted">Repo:</span><span style="word-break:break-all;">${p.repo}</span>`;
+  if (p.branch) preview += `<span class="text-muted">Branch:</span><span>${p.branch}</span>`;
+  if (p.dataset) preview += `<span class="text-muted">Dataset:</span><span>${p.dataset}</span>`;
+  preview += '</div>';
+  document.getElementById('config-preview').innerHTML = preview;
+
   generateJobId();
 }
 
 function generateJobId() {
   const name = document.getElementById('submitted_by').value || 'team';
-  const preset = document.getElementById('preset_select').value || 'custom';
+  const presetEl = document.getElementById('preset_select');
+  const preset = presetEl.value || 'custom';
   const ds = document.getElementById('dataset_version').value || 'data';
   const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
-  const short = preset.replace('custom','run').split('-').slice(0,2).join('-');
+  const short = preset === 'custom' ? 'run' : preset.split('-').slice(0,2).join('-');
   document.getElementById('job_id').value = `${short}-${ds}-${name}-${ts}`;
 }
 
@@ -143,7 +177,6 @@ document.getElementById('submitted_by_select').addEventListener('change', functi
   document.getElementById('submitted_by').value = this.value;
   generateJobId();
 });
-document.getElementById('submitted_by').addEventListener('input', generateJobId);
 document.getElementById('dataset_version').addEventListener('change', generateJobId);
 </script>
 {% endblock %}
