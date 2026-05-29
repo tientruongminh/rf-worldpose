@@ -1,4 +1,4 @@
-name: CD — Deploy to VPS
+name: CD - Deploy to VPS
 
 on:
   push:
@@ -18,17 +18,4 @@ jobs:
           VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
           echo "Connecting to $VPS_HOST..."
-          sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@"$VPS_HOST" 'bash -s' << 'DEPLOY'
-          set -e
-          echo "=== Pulling latest code ==="
-          cd /opt/rfpose/rf-worldpose
-          git fetch origin main
-          git reset --hard origin/main
-          echo "=== Deploying services ==="
-          cd infra/docker-compose
-          docker compose up -d --force-recreate --remove-orphans 2>&1
-          echo "=== Waiting for startup ==="
-          sleep 15
-          docker compose ps
-          echo "=== Deploy complete ==="
-          DEPLOY
+          sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@"$VPS_HOST" "cd /opt/rfpose/rf-worldpose && git fetch origin main && git reset --hard origin/main && cd infra/docker-compose && docker compose up -d --force-recreate --remove-orphans 2>&1 && sleep 15 && docker compose ps && echo DEPLOY_OK"
