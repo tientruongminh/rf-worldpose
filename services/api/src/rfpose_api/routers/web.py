@@ -32,6 +32,39 @@ STATUS_MAP = {
     "TIMEOUT": "failed", "OUT_OF_MEMORY": "failed", "NODE_FAIL": "failed",
 }
 
+TRAINING_PRESETS = [
+    {
+        "id": "wipose-action-baseline",
+        "label": "Wi-Pose Action Recognition (baseline)",
+        "config": "epochs=50\nbatch_size=128\nlr=3e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=5\nnum_classes=12\nnum_keypoints=18",
+        "dataset_hint": "wipose-v1",
+    },
+    {
+        "id": "wipose-pose2d",
+        "label": "Wi-Pose 2D Pose Estimation",
+        "config": "epochs=80\nbatch_size=64\nlr=1e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=5\nnum_classes=12\nnum_keypoints=18\npose_weight=1.0",
+        "dataset_hint": "wipose-v1",
+    },
+    {
+        "id": "wiar-action-baseline",
+        "label": "WiAR 16-Activity Recognition (baseline)",
+        "config": "epochs=50\nbatch_size=128\nlr=3e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=1\nnum_classes=16",
+        "dataset_hint": "wiar-v1",
+    },
+    {
+        "id": "wiar-action-lora",
+        "label": "WiAR LoRA Fine-tune",
+        "config": "epochs=30\nbatch_size=64\nlr=1e-4\nnum_nodes=9\nwindow_frames=30\nn_subcarriers=30\nchannels=1\nnum_classes=16\nlora_rank=8\nlora_alpha=16",
+        "dataset_hint": "wiar-v1",
+    },
+    {
+        "id": "custom",
+        "label": "Custom config (type below)",
+        "config": "",
+        "dataset_hint": "",
+    },
+]
+
 
 def _render(request: Request, name: str, ctx: dict):
     return _templates.TemplateResponse(request=request, name=name, context=ctx)
@@ -110,7 +143,8 @@ def quick_submit(request: Request, script_name: str = Form(...), submitted_by: s
 def submit_form(request: Request):
     datasets = _list_datasets()
     return _render(request, "submit.html", {
-        "datasets": datasets, "form": None, "error": None, "dry_run_result": None,
+        "datasets": datasets, "presets": TRAINING_PRESETS,
+        "form": None, "error": None, "dry_run_result": None,
     })
 
 
@@ -135,7 +169,8 @@ def submit_job(
 
     if not ds:
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "form": form_data,
+            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "form": form_data,
             "error": "Please select or type a dataset version.", "dry_run_result": None,
         })
 
@@ -151,7 +186,8 @@ def submit_job(
     except Exception as exc:
         log.warning("create job failed: %s", exc)
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "form": form_data,
+            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "form": form_data,
             "error": f"Failed to create job: {exc}", "dry_run_result": None,
         })
 
@@ -296,7 +332,8 @@ def _try_submit(request: Request, job, *, dry_run: bool):
 
     if dry_run:
         return _render(request, "submit.html", {
-            "datasets": _list_datasets(), "form": None, "error": None, "dry_run_result": result,
+            "datasets": _list_datasets(), "presets": TRAINING_PRESETS,
+            "form": None, "error": None, "dry_run_result": result,
         })
 
     with connect() as conn, conn.cursor() as cur:
