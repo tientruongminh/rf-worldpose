@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}HPC Connection{% endblock %}
+
+{% block content %}
+<a href="/portal" class="text-sm text-muted">&larr; Back to dashboard</a>
+<h2 style="font-size:1.5rem; font-weight:700; margin-top:0.25rem; margin-bottom:1.5rem;">Helios HPC Connection</h2>
+
+<div class="grid-2 gap-4 mb-6">
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Configuration</h3>
+    <dl class="detail-grid">
+      <dt>Login Node</dt>
+      <dd>{{ config.helios_login }}</dd>
+
+      <dt>SSH Target</dt>
+      <dd><code>{{ config.helios_ssh_target }}</code></dd>
+
+      <dt>SSH Key</dt>
+      <dd>{{ config.helios_ssh_key or '(system default — ~/.ssh/id_rsa)' }}</dd>
+
+      <dt>Account</dt>
+      <dd>
+        {% if config.helios_account == 'CHANGE_ME-gpu-gh200' %}
+          <span style="color:var(--c-red);">⚠ CHANGE_ME — not configured</span>
+        {% else %}
+          {{ config.helios_account }}
+        {% endif %}
+      </dd>
+
+      <dt>Partition</dt>
+      <dd>{{ config.helios_partition }}</dd>
+
+      <dt>S3 Endpoint</dt>
+      <dd>{{ config.s3_endpoint_url }}</dd>
+
+      <dt>MLflow</dt>
+      <dd>{{ config.mlflow_tracking_uri }}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Connection Test</h3>
+    <div id="test-result">
+      <p class="text-muted">Click below to test SSH connectivity to Helios.</p>
+    </div>
+    <button class="btn btn-primary mt-4"
+            hx-get="/portal/connection-test"
+            hx-target="#test-result"
+            hx-indicator="#test-spinner">
+      Test Connection <span id="test-spinner" class="htmx-indicator spinner"></span>
+    </button>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Setup Guide</h3>
+  <div style="line-height:1.8; font-size:0.9rem;">
+    <p><strong>1. Đăng ký tài khoản Helios PLGrid:</strong></p>
+    <p class="text-muted" style="margin-left:1rem;">Tạo account tại <a href="https://portal.plgrid.pl" target="_blank">portal.plgrid.pl</a>, xin grant access partition <code>plgrid-gpu-gh200</code>.</p>
+
+    <p style="margin-top:1rem;"><strong>2. Generate SSH key trên VPS:</strong></p>
+    <pre class="sbatch" style="margin:0.5rem 0 0 1rem;">ssh-keygen -t ed25519 -f /opt/rfpose/.ssh/helios_ed25519 -N ""
+ssh-copy-id -i /opt/rfpose/.ssh/helios_ed25519.pub YOUR_USER@login01.helios.cyfronet.pl</pre>
+
+    <p style="margin-top:1rem;"><strong>3. Cấu hình .env trên VPS:</strong></p>
+    <pre class="sbatch" style="margin:0.5rem 0 0 1rem;">HELIOS_USER=your_plgrid_username
+HELIOS_SSH_KEY=/opt/rfpose/.ssh/helios_ed25519
+HELIOS_ACCOUNT=your_grant_id-gpu-gh200
+HELIOS_LOGIN=login01.helios.cyfronet.pl
+
+# S3 endpoint reachable từ Helios compute nodes
+S3_ENDPOINT_URL=http://207.180.243.242:9000
+MLFLOW_TRACKING_URI=http://207.180.243.242:5000</pre>
+
+    <p style="margin-top:1rem;"><strong>4. Test connection:</strong> Bấm nút "Test Connection" ở trên.</p>
+  </div>
+</div>
+{% endblock %}

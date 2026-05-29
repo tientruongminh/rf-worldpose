@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Submit Job{% endblock %}
+
+{% block content %}
+<a href="/portal" class="text-sm text-muted">&larr; Back to dashboard</a>
+<h2 style="font-size:1.5rem; font-weight:700; margin-top:0.25rem; margin-bottom:1.5rem;">Submit Training Job</h2>
+
+{% if error %}
+<div class="flash flash-error">{{ error }}</div>
+{% endif %}
+
+<form method="POST" action="/portal/submit" class="card">
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="job_id">Job ID</label>
+      <input type="text" id="job_id" name="job_id" required
+             placeholder="e.g. train-lora-v3-ngan-20260530"
+             value="{{ form.job_id if form else '' }}">
+    </div>
+    <div>
+      <label for="submitted_by">Your Name</label>
+      <input type="text" id="submitted_by" name="submitted_by" required
+             placeholder="e.g. ngan"
+             value="{{ form.submitted_by if form else '' }}">
+    </div>
+  </div>
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="dataset_version">Dataset Version</label>
+      <select id="dataset_version" name="dataset_version" required>
+        <option value="">Select dataset...</option>
+        {% for ds in datasets %}
+        <option value="{{ ds.id }}" {% if form and form.dataset_version == ds.id %}selected{% endif %}>
+          {{ ds.id }}
+        </option>
+        {% endfor %}
+        {% if not datasets %}
+        <option value="" disabled>No datasets registered yet</option>
+        {% endif %}
+      </select>
+      <p class="text-sm text-muted mt-2">Or type a version ID directly:</p>
+      <input type="text" name="dataset_version_manual" placeholder="gold-v1.2"
+             value="{{ form.dataset_version_manual if form else '' }}"
+             style="margin-top:0.25rem;">
+    </div>
+    <div>
+      <label for="train_config">Training Config</label>
+      <textarea id="train_config" name="train_config" rows="4" required
+                placeholder="configs/rf_worldpose_lora.yaml">{{ form.train_config if form else 'configs/rf_worldpose_lora.yaml' }}</textarea>
+      <p class="text-sm text-muted mt-2">Config file path or inline YAML.</p>
+    </div>
+  </div>
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="backend">Backend</label>
+      <select id="backend" name="backend">
+        <option value="helios-slurm">Helios Slurm (GH200)</option>
+      </select>
+    </div>
+    <div>
+      <label>Options</label>
+      <div class="flex items-center gap-4 mt-2">
+        <label style="text-transform:none; font-weight:normal; display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="checkbox" name="auto_submit" value="1"
+                 {% if form and form.auto_submit %}checked{% endif %}
+                 style="width:auto;">
+          Auto-submit to Helios after creation
+        </label>
+        <label style="text-transform:none; font-weight:normal; display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="checkbox" name="dry_run" value="1"
+                 style="width:auto;">
+          Dry run (preview sbatch only)
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="flex gap-2 mt-6">
+    <button type="submit" class="btn btn-primary">Create Training Job</button>
+    <a href="/portal" class="btn btn-ghost">Cancel</a>
+  </div>
+</form>
+
+{% if dry_run_result %}
+<div class="card mt-4">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Dry Run — Generated sbatch</h3>
+  <pre class="sbatch">{{ dry_run_result }}</pre>
+</div>
+{% endif %}
+{% endblock %}
