@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, Form, Request
@@ -11,11 +12,28 @@ from fastapi.templating import Jinja2Templates
 from rfpose_api.config import settings
 from rfpose_api.db.connection import connect
 
+sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
+from rfpose_helios.submit import HeliosJobSpec, submit_training_job, submit_script, test_connection, list_remote_scripts
+from rfpose_helios.status import slurm_status
+from rfpose_helios.cancel import cancel_job as _cancel_job
+
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/portal", tags=["portal"], default_response_class=HTMLResponse)
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
+_login = settings.hpc_ssh_target
+_ssh_key = settings.hpc_ssh_key
+_work_dir = settings.hpc_work_dir
+
+STATUS_MAP = {
+    "PENDING": "submitted", "RUNNING": "running", "COMPLETING": "running",
+    "COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled",
+    "TIMEOUT": "failed", "OUT_OF_MEMORY": "failed", "NODE_FAIL": "failed",
+}
+
+
+# ── Dashboard ───────────────────────────────────────────────
 
 @router.get("")
 def dashboard(request: Request, status: str | None = None):
@@ -48,6 +66,55 @@ def dashboard(request: Request, status: str | None = None):
     })
 
 
+# ── Quick Submit (existing HPC script) ─────────────────────
+
+@router.get("/quick-submit")
+def quick_submit_form(request: Request):
+    scripts = list_remote_scripts(_login, ssh_key=_ssh_key, remote_dir=_work_dir)
+    return templates.TemplateResponse("quick_submit.html", {
+        "request": request,
+        "scripts": scripts,
+        "work_dir": _work_dir,
+        "result": None,
+        "error": None,
+    })
+
+
+@router.post("/quick-submit")
+def quick_submit(request: Request, script_name: str = Form(...), submitted_by: str = Form("")):
+    scripts = list_remote_scripts(_login, ssh_key=_ssh_key, remote_dir=_work_dir)
+    try:
+        slurm_id = submit_script(login=_login, ssh_key=_ssh_key, remote_dir=_work_dir, script_name=script_name)
+
+        with connect() as conn, conn.cursor() as cur:
+            job_id = f"quick-{slurm_id}"
+            cur.execute(
+                """INSERT INTO training_jobs(id, dataset_version, train_config, backend, submitted_by, status, slurm_job_id, submitted_at)
+                   VALUES (%s, 'n/a', %s, 'eagle-slurm', %s, 'submitted', %s, now())
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING *""",
+                (job_id, script_name, submitted_by or "portal", slurm_id),
+            )
+
+        return templates.TemplateResponse("quick_submit.html", {
+            "request": request,
+            "scripts": scripts,
+            "work_dir": _work_dir,
+            "result": {"slurm_job_id": slurm_id, "script": script_name, "job_id": job_id},
+            "error": None,
+        })
+    except Exception as exc:
+        return templates.TemplateResponse("quick_submit.html", {
+            "request": request,
+            "scripts": scripts,
+            "work_dir": _work_dir,
+            "result": None,
+            "error": str(exc),
+        })
+
+
+# ── Full Submit (generate sbatch) ──────────────────────────
+
 @router.get("/submit")
 def submit_form(request: Request):
     datasets = _list_datasets()
@@ -68,7 +135,7 @@ def submit_job(
     dataset_version: str = Form(""),
     dataset_version_manual: str = Form(""),
     train_config: str = Form(...),
-    backend: str = Form("helios-slurm"),
+    backend: str = Form("eagle-slurm"),
     auto_submit: str = Form(""),
     dry_run: str = Form(""),
 ):
@@ -116,6 +183,8 @@ def submit_job(
     return RedirectResponse(f"/portal/jobs/{job_id}", status_code=303)
 
 
+# ── Job Detail ──────────────────────────────────────────────
+
 @router.get("/jobs/{job_id}")
 def job_detail(request: Request, job_id: str):
     job = _get_job(job_id)
@@ -130,26 +199,15 @@ def job_detail(request: Request, job_id: str):
 
 @router.post("/jobs/{job_id}/refresh")
 def refresh_status_web(request: Request, job_id: str):
-    """HTMX endpoint — refresh Slurm status and return partial."""
     job = _get_job(job_id)
     if not job or not job.get("slurm_job_id"):
         return _job_fragment(request, job, message="No Slurm job to refresh", message_type="error")
 
-    import sys
-    sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
-    from rfpose_helios.status import slurm_status
-
     try:
-        raw = slurm_status(settings.helios_ssh_target, job["slurm_job_id"], ssh_key=settings.helios_ssh_key)
+        raw = slurm_status(_login, job["slurm_job_id"], ssh_key=_ssh_key)
         parts = raw.split("|") if raw else []
         slurm_state = parts[1] if len(parts) > 1 else "UNKNOWN"
-
-        status_map = {
-            "PENDING": "submitted", "RUNNING": "running", "COMPLETING": "running",
-            "COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled",
-            "TIMEOUT": "failed", "OUT_OF_MEMORY": "failed", "NODE_FAIL": "failed",
-        }
-        new_status = status_map.get(slurm_state, job["status"])
+        new_status = STATUS_MAP.get(slurm_state, job["status"])
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -171,12 +229,8 @@ def cancel_web(request: Request, job_id: str):
     if not job or not job.get("slurm_job_id"):
         return _job_fragment(request, job, message="No Slurm job to cancel", message_type="error")
 
-    import sys
-    sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
-    from rfpose_helios.cancel import cancel_job
-
     try:
-        cancel_job(settings.helios_ssh_target, job["slurm_job_id"], ssh_key=settings.helios_ssh_key)
+        _cancel_job(_login, job["slurm_job_id"], ssh_key=_ssh_key)
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """UPDATE training_jobs
@@ -198,6 +252,8 @@ def submit_existing_web(request: Request, job_id: str):
     return _try_submit(request, job, dry_run=False)
 
 
+# ── HPC Connection ──────────────────────────────────────────
+
 @router.get("/connection")
 def connection_page(request: Request):
     return templates.TemplateResponse("connection.html", {
@@ -208,11 +264,7 @@ def connection_page(request: Request):
 
 @router.get("/connection-test")
 def connection_test_web(request: Request):
-    import sys
-    sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
-    from rfpose_helios.submit import test_connection
-
-    result = test_connection(settings.helios_ssh_target, ssh_key=settings.helios_ssh_key)
+    result = test_connection(_login, ssh_key=_ssh_key)
 
     if result["ok"]:
         html = f"""
@@ -253,16 +305,12 @@ def _job_fragment(request: Request, job, *, message=None, message_type="success"
 
 
 def _try_submit(request: Request, job, *, dry_run: bool):
-    import sys
-    sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
-    from rfpose_helios.submit import HeliosJobSpec, submit_training_job
-
     spec = HeliosJobSpec(
         job_id=job["id"],
         dataset_version=job["dataset_version"],
         train_config=job["train_config"],
-        account=settings.helios_account,
-        partition=settings.helios_partition,
+        account=settings.hpc_account,
+        partition=settings.hpc_partition,
         s3_bucket=settings.s3_bucket,
         s3_endpoint_url=settings.s3_endpoint_url,
         mlflow_tracking_uri=settings.mlflow_tracking_uri,
@@ -270,8 +318,8 @@ def _try_submit(request: Request, job, *, dry_run: bool):
 
     try:
         result = submit_training_job(
-            spec, login=settings.helios_ssh_target,
-            ssh_key=settings.helios_ssh_key, dry_run=dry_run,
+            spec, login=_login, ssh_key=_ssh_key,
+            remote_dir=_work_dir, dry_run=dry_run,
         )
     except Exception as exc:
         return templates.TemplateResponse("job_detail.html", {

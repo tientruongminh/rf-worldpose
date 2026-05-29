@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "templates" / "train_gh200.sbatch"
@@ -13,8 +13,8 @@ class HeliosJobSpec:
     job_id: str
     dataset_version: str
     train_config: str
-    account: str
-    partition: str = "plgrid-gpu-gh200"
+    account: str = ""
+    partition: str = ""
     s3_bucket: str = "rfpose"
     s3_endpoint_url: str = "http://minio:9000"
     mlflow_tracking_uri: str = "http://mlflow:5000"
@@ -39,7 +39,6 @@ def render_sbatch(spec: HeliosJobSpec) -> str:
 
 
 def _ssh_opts(ssh_key: str = "") -> list[str]:
-    """Build common SSH option flags."""
     opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
     if ssh_key:
         opts += ["-i", ssh_key]
@@ -79,15 +78,31 @@ def submit_training_job(
     return out
 
 
+def submit_script(
+    *,
+    login: str,
+    ssh_key: str = "",
+    remote_dir: str,
+    script_name: str,
+) -> str:
+    """Submit an existing script already on the HPC node."""
+    opts = _ssh_opts(ssh_key)
+    cmd = f"cd {shlex.quote(remote_dir)} && sbatch --parsable {shlex.quote(script_name)}"
+    out = subprocess.check_output(
+        ["ssh", *opts, login, cmd], text=True, timeout=30,
+    ).strip()
+    return out
+
+
 def test_connection(login: str, ssh_key: str = "") -> dict:
-    """Quick SSH connectivity test — returns hostname + queue info."""
+    """Quick SSH connectivity test."""
     opts = _ssh_opts(ssh_key)
     try:
         host = subprocess.check_output(
             ["ssh", *opts, login, "hostname"], text=True, timeout=15,
         ).strip()
         queue = subprocess.check_output(
-            ["ssh", *opts, login, "squeue -u $USER --format='%.8i %.9P %.20j %.2t %.10M' --noheader | head -5"],
+            ["ssh", *opts, login, "squeue -u $USER --format='%.8i %.9P %.20j %.2t %.10M' --noheader 2>/dev/null | head -5"],
             text=True, timeout=15,
         ).strip()
         return {"ok": True, "hostname": host, "queue_preview": queue}
@@ -97,3 +112,18 @@ def test_connection(login: str, ssh_key: str = "") -> dict:
         return {"ok": False, "error": f"SSH failed (exit {exc.returncode}): {exc.stderr or exc.stdout or ''}"}
     except FileNotFoundError:
         return {"ok": False, "error": "ssh binary not found on this system"}
+
+
+def list_remote_scripts(login: str, ssh_key: str = "", remote_dir: str = "") -> list[str]:
+    """List .sh and .sbatch files in the remote work dir."""
+    if not remote_dir:
+        return []
+    opts = _ssh_opts(ssh_key)
+    try:
+        out = subprocess.check_output(
+            ["ssh", *opts, login, f"ls {shlex.quote(remote_dir)}/*.sh {shlex.quote(remote_dir)}/*.sbatch 2>/dev/null"],
+            text=True, timeout=15,
+        ).strip()
+        return [Path(f).name for f in out.splitlines() if f.strip()]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []

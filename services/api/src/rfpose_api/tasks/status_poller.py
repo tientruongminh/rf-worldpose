@@ -47,8 +47,8 @@ async def run_status_poller():
 def _poll_once():
     from rfpose_helios.status import slurm_status
 
-    login = settings.helios_ssh_target
-    ssh_key = settings.helios_ssh_key
+    login = settings.hpc_ssh_target
+    ssh_key = settings.hpc_ssh_key
 
     with connect() as conn, conn.cursor() as cur:
         cur.execute(

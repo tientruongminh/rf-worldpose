@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Quick Submit{% endblock %}
+
+{% block content %}
+<a href="/portal" class="text-sm text-muted">&larr; Back to dashboard</a>
+<h2 style="font-size:1.5rem; font-weight:700; margin-top:0.25rem; margin-bottom:1.5rem;">
+  Quick Submit — Run Existing Script on HPC
+</h2>
+
+{% if error %}
+<div class="flash flash-error">{{ error }}</div>
+{% endif %}
+
+{% if result %}
+<div class="flash flash-success">
+  Submitted <strong>{{ result.script }}</strong> — Slurm Job ID: <strong>{{ result.slurm_job_id }}</strong>
+  &nbsp; <a href="/portal/jobs/{{ result.job_id }}">View job &rarr;</a>
+</div>
+{% endif %}
+
+<div class="grid-2 gap-4">
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Select Script</h3>
+    <p class="text-sm text-muted mb-4">
+      Scripts found in <code>{{ work_dir }}</code> on Eagle HPC:
+    </p>
+
+    {% if scripts %}
+    <form method="POST" action="/portal/quick-submit">
+      <div class="mb-4">
+        <label for="script_name">Script</label>
+        <select id="script_name" name="script_name" required>
+          {% for s in scripts %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-4">
+        <label for="submitted_by">Your Name</label>
+        <input type="text" id="submitted_by" name="submitted_by" placeholder="e.g. tien" required>
+      </div>
+      <button type="submit" class="btn btn-primary">Submit to Eagle</button>
+    </form>
+    {% else %}
+    <p style="color:var(--c-amber);">
+      No .sh or .sbatch scripts found in <code>{{ work_dir }}</code>.<br>
+      Upload scripts to HPC first, then refresh this page.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">How it works</h3>
+    <div class="text-sm" style="line-height:1.8; color:var(--c-muted);">
+      <p>1. Script phải nằm sẵn trên HPC tại <code>{{ work_dir }}/</code></p>
+      <p>2. Portal sẽ SSH vào Eagle và chạy <code>sbatch script.sh</code></p>
+      <p>3. Slurm Job ID được lưu vào DB để theo dõi status</p>
+      <p>4. Status tự cập nhật mỗi 2 phút, hoặc bấm Refresh thủ công</p>
+      <p style="margin-top:1rem;">Để upload script mới lên HPC:</p>
+      <pre class="sbatch" style="font-size:0.75rem;">scp my_job.sh tiencd1234@eagle.man.poznan.pl:{{ work_dir }}/</pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
