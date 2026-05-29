@@ -1,0 +1,29 @@
+name: CD — Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    needs: []
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            cd /opt/rfpose/rf-worldpose
+            git fetch origin main
+            git reset --hard origin/main
+            cd infra/docker-compose
+            docker compose pull 2>/dev/null || true
+            docker compose up -d --force-recreate --remove-orphans
+            sleep 15
+            docker compose ps
+            echo "=== Deploy complete ==="
