@@ -27,7 +27,7 @@
             hx-post="/portal/jobs/{{ job.id }}/submit"
             hx-target="#job-info" hx-swap="innerHTML"
             hx-indicator="#submit-spinner">
-      Submit to Helios <span id="submit-spinner" class="htmx-indicator spinner"></span>
+      Submit to HPC <span id="submit-spinner" class="htmx-indicator spinner"></span>
     </button>
     {% endif %}
   </div>
@@ -40,4 +40,31 @@
 <div id="job-info">
   {% include "job_info_fragment.html" %}
 </div>
+
+{% if job.slurm_job_id %}
+<div class="card mt-4">
+  <div class="flex justify-between items-center" style="margin-bottom:1rem;">
+    <h3 style="font-size:1rem; font-weight:600;">Slurm Logs</h3>
+    <button class="btn btn-ghost btn-sm"
+            hx-get="/portal/jobs/{{ job.id }}/logs"
+            hx-target="#logs-panel" hx-swap="innerHTML"
+            hx-indicator="#logs-spinner">
+      Fetch Logs <span id="logs-spinner" class="htmx-indicator spinner"></span>
+    </button>
+  </div>
+  <div id="logs-panel">
+    <p class="text-sm text-muted">Click "Fetch Logs" to retrieve output from HPC.</p>
+  </div>
+</div>
+{% endif %}
+
+{% if job.status == 'completed' %}
+<div class="card mt-4">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Next Steps</h3>
+  <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+    <a href="/portal/models" class="btn btn-primary">View in Model Registry</a>
+    <a href="{{ mlflow_url }}/{{ job.id }}" target="_blank" class="btn btn-ghost">Open in MLflow</a>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

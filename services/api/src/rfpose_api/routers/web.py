@@ -14,7 +14,7 @@ from rfpose_api.db.connection import connect
 
 sys.path.append(str(Path(__file__).resolve().parents[5] / "helios_runner"))
 from rfpose_helios.submit import HeliosJobSpec, submit_training_job, submit_script, test_connection, list_remote_scripts
-from rfpose_helios.status import slurm_status
+from rfpose_helios.status import slurm_status, slurm_job_detail, fetch_slurm_logs
 from rfpose_helios.cancel import cancel_job as _cancel_job
 
 log = logging.getLogger(__name__)
@@ -197,7 +197,10 @@ def job_detail(request: Request, job_id: str):
     job = _get_job(job_id)
     if not job:
         return RedirectResponse("/portal", status_code=303)
-    return _render(request, "job_detail.html", {"job": job, "message": None})
+    return _render(request, "job_detail.html", {
+        "job": job, "message": None,
+        "mlflow_url": settings.mlflow_tracking_uri or "http://207.180.243.242:5000",
+    })
 
 
 @router.post("/jobs/{job_id}/refresh")
@@ -253,6 +256,120 @@ def submit_existing_web(request: Request, job_id: str):
     if not job:
         return RedirectResponse("/portal", status_code=303)
     return _try_submit(request, job, dry_run=False)
+
+
+@router.get("/jobs/{job_id}/logs")
+def job_logs_web(request: Request, job_id: str):
+    job = _get_job(job_id)
+    if not job or not job.get("slurm_job_id"):
+        return HTMLResponse("<pre class='sbatch'>No Slurm job — no logs available.</pre>")
+    try:
+        logs = fetch_slurm_logs(
+            _login, job["slurm_job_id"],
+            ssh_key=_ssh_key, remote_dir=_work_dir,
+        )
+        detail = slurm_job_detail(
+            _login, job["slurm_job_id"], ssh_key=_ssh_key,
+        )
+    except Exception as exc:
+        return HTMLResponse(f"<pre class='sbatch'>Failed to fetch logs: {exc}</pre>")
+
+    detail_html = ""
+    if detail and "error" not in detail:
+        detail_html = "<div style='display:grid;grid-template-columns:120px 1fr;gap:0.25rem 1rem;margin-bottom:1rem;'>"
+        for k, v in detail.items():
+            if v:
+                detail_html += f"<span class='text-muted text-sm'>{k}</span><span class='text-sm'>{v}</span>"
+        detail_html += "</div>"
+
+    stdout = logs.get("stdout", "")
+    stderr = logs.get("stderr", "")
+    html = f"""
+    {detail_html}
+    <h4 style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem;color:var(--c-green);">stdout</h4>
+    <pre class="sbatch" style="max-height:400px;overflow-y:auto;">{stdout or '(empty)'}</pre>
+    <h4 style="font-size:0.85rem;font-weight:600;margin:1rem 0 0.5rem;color:var(--c-amber);">stderr</h4>
+    <pre class="sbatch" style="max-height:300px;overflow-y:auto;">{stderr or '(empty)'}</pre>
+    """
+    return HTMLResponse(html)
+
+
+# ── Inference ────────────────────────────────────────────────
+
+@router.get("/inference")
+def inference_page(request: Request):
+    return _render(request, "inference.html", {})
+
+
+# ── Model Registry ───────────────────────────────────────────
+
+@router.get("/models")
+def models_list(request: Request):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM model_versions ORDER BY created_at DESC LIMIT 100")
+        models = cur.fetchall()
+        cur.execute("SELECT * FROM model_versions WHERE status='production' LIMIT 1")
+        active = cur.fetchone()
+    return _render(request, "models.html", {
+        "models": models, "active_model": active, "message": None, "message_type": None,
+    })
+
+
+@router.post("/models/{model_id}/promote")
+def promote_web(request: Request, model_id: str):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE model_versions SET status='archived'
+               WHERE name=(SELECT name FROM model_versions WHERE id=%s) AND status='production'""",
+            (model_id,),
+        )
+        cur.execute(
+            "UPDATE model_versions SET status='production', promoted_at=now() WHERE id=%s",
+            (model_id,),
+        )
+    return RedirectResponse("/portal/models", status_code=303)
+
+
+@router.post("/models/{model_id}/deploy")
+def deploy_model_web(request: Request, model_id: str):
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM model_versions WHERE id=%s", (model_id,))
+        model = cur.fetchone()
+
+    if not model:
+        return RedirectResponse("/portal/models", status_code=303)
+
+    artifact_uri = model.get("artifact_uri", "")
+    try:
+        import subprocess
+        s3_src = artifact_uri if artifact_uri else f"s3://{settings.s3_bucket}/models/rfpose-{model.get('training_job_id', 'unknown')}/"
+        deploy_dir = "/opt/rfpose/models/production"
+
+        subprocess.run(
+            ["mkdir", "-p", deploy_dir], check=True, timeout=5,
+        )
+        subprocess.run(
+            ["aws", "s3", "sync", s3_src, f"{deploy_dir}/",
+             "--endpoint-url", settings.s3_endpoint_url],
+            check=True, timeout=120,
+        )
+
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE model_versions SET status='production', promoted_at=now() WHERE id=%s",
+                (model_id,),
+            )
+
+        return _render(request, "models.html", {
+            "models": _list_all_models(), "active_model": model,
+            "message": f"Model {model_id} deployed to {deploy_dir}",
+            "message_type": "success",
+        })
+    except Exception as exc:
+        return _render(request, "models.html", {
+            "models": _list_all_models(), "active_model": model,
+            "message": f"Deploy failed: {exc}", "message_type": "error",
+        })
 
 
 # ── HPC Connection ──────────────────────────────────────────
@@ -403,6 +520,15 @@ def _list_datasets():
     try:
         with connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT id FROM dataset_versions ORDER BY created_at DESC LIMIT 50")
+            return cur.fetchall()
+    except Exception:
+        return []
+
+
+def _list_all_models():
+    try:
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM model_versions ORDER BY created_at DESC LIMIT 100")
             return cur.fetchall()
     except Exception:
         return []

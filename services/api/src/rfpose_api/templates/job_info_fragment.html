@@ -22,9 +22,6 @@
       <dt>Dataset</dt>
       <dd>{{ job.dataset_version }}</dd>
 
-      <dt>Config</dt>
-      <dd style="word-break:break-all;">{{ job.train_config }}</dd>
-
       <dt>Submitted By</dt>
       <dd>{{ job.submitted_by or '—' }}</dd>
     </dl>
@@ -52,10 +49,21 @@
 </div>
 
 <div class="card mt-4">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Training Config</h3>
+  <pre class="sbatch" style="max-height:200px; overflow-y:auto;">{{ job.train_config }}</pre>
+</div>
+
+<div class="card mt-4">
   <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Artifacts</h3>
   <dl class="detail-grid">
     <dt>Model Artifact</dt>
-    <dd>{{ job.artifact_uri or '—' }}</dd>
+    <dd>
+      {% if job.artifact_uri %}
+      <a href="{{ job.artifact_uri }}" target="_blank">{{ job.artifact_uri }}</a>
+      {% else %}
+      <span class="text-muted">s3://rfpose/models/rfpose-{{ job.slurm_job_id or '?' }}/</span>
+      {% endif %}
+    </dd>
 
     <dt>Eval Report</dt>
     <dd>{{ job.eval_report_uri or '—' }}</dd>
