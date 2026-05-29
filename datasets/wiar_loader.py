@@ -15,7 +15,7 @@ READ_CSI_DIR = r"C:\Users\Ngan\Downloads\DEEP LEARNING PROJECT"
 if READ_CSI_DIR not in sys.path:
     sys.path.append(READ_CSI_DIR)
 
-from read_csi import load_wiar_file, ACTIVITY_LABELS
+from .read_csi import load_wiar_file, ACTIVITY_LABELS
 
 
 class WiARDataset(Dataset):
