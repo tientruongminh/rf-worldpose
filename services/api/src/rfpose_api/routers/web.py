@@ -20,7 +20,7 @@ from rfpose_helios.cancel import cancel_job as _cancel_job
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/portal", tags=["portal"], default_response_class=HTMLResponse)
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+_templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 _login = settings.hpc_ssh_target
 _ssh_key = settings.hpc_ssh_key
@@ -31,6 +31,10 @@ STATUS_MAP = {
     "COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled",
     "TIMEOUT": "failed", "OUT_OF_MEMORY": "failed", "NODE_FAIL": "failed",
 }
+
+
+def _render(request: Request, name: str, ctx: dict):
+    return _templates.TemplateResponse(request=request, name=name, context=ctx)
 
 
 # ── Dashboard ───────────────────────────────────────────────
@@ -58,11 +62,8 @@ def dashboard(request: Request, status: str | None = None):
         )
         stats = cur.fetchone()
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "jobs": jobs,
-        "stats": stats,
-        "filter_status": status,
+    return _render(request, "dashboard.html", {
+        "jobs": jobs, "stats": stats, "filter_status": status,
     })
 
 
@@ -71,12 +72,8 @@ def dashboard(request: Request, status: str | None = None):
 @router.get("/quick-submit")
 def quick_submit_form(request: Request):
     scripts = list_remote_scripts(_login, ssh_key=_ssh_key, remote_dir=_work_dir)
-    return templates.TemplateResponse("quick_submit.html", {
-        "request": request,
-        "scripts": scripts,
-        "work_dir": _work_dir,
-        "result": None,
-        "error": None,
+    return _render(request, "quick_submit.html", {
+        "scripts": scripts, "work_dir": _work_dir, "result": None, "error": None,
     })
 
 
@@ -96,20 +93,14 @@ def quick_submit(request: Request, script_name: str = Form(...), submitted_by: s
                 (job_id, script_name, submitted_by or "portal", slurm_id),
             )
 
-        return templates.TemplateResponse("quick_submit.html", {
-            "request": request,
-            "scripts": scripts,
-            "work_dir": _work_dir,
+        return _render(request, "quick_submit.html", {
+            "scripts": scripts, "work_dir": _work_dir,
             "result": {"slurm_job_id": slurm_id, "script": script_name, "job_id": job_id},
             "error": None,
         })
     except Exception as exc:
-        return templates.TemplateResponse("quick_submit.html", {
-            "request": request,
-            "scripts": scripts,
-            "work_dir": _work_dir,
-            "result": None,
-            "error": str(exc),
+        return _render(request, "quick_submit.html", {
+            "scripts": scripts, "work_dir": _work_dir, "result": None, "error": str(exc),
         })
 
 
@@ -118,12 +109,8 @@ def quick_submit(request: Request, script_name: str = Form(...), submitted_by: s
 @router.get("/submit")
 def submit_form(request: Request):
     datasets = _list_datasets()
-    return templates.TemplateResponse("submit.html", {
-        "request": request,
-        "datasets": datasets,
-        "form": None,
-        "error": None,
-        "dry_run_result": None,
+    return _render(request, "submit.html", {
+        "datasets": datasets, "form": None, "error": None, "dry_run_result": None,
     })
 
 
@@ -141,21 +128,15 @@ def submit_job(
 ):
     ds = dataset_version_manual.strip() or dataset_version.strip()
     form_data = {
-        "job_id": job_id,
-        "submitted_by": submitted_by,
-        "dataset_version": ds,
+        "job_id": job_id, "submitted_by": submitted_by, "dataset_version": ds,
         "dataset_version_manual": dataset_version_manual,
-        "train_config": train_config,
-        "auto_submit": auto_submit,
+        "train_config": train_config, "auto_submit": auto_submit,
     }
 
     if not ds:
-        return templates.TemplateResponse("submit.html", {
-            "request": request,
-            "datasets": _list_datasets(),
-            "form": form_data,
-            "error": "Please select or type a dataset version.",
-            "dry_run_result": None,
+        return _render(request, "submit.html", {
+            "datasets": _list_datasets(), "form": form_data,
+            "error": "Please select or type a dataset version.", "dry_run_result": None,
         })
 
     try:
@@ -169,12 +150,9 @@ def submit_job(
             job = cur.fetchone()
     except Exception as exc:
         log.warning("create job failed: %s", exc)
-        return templates.TemplateResponse("submit.html", {
-            "request": request,
-            "datasets": _list_datasets(),
-            "form": form_data,
-            "error": f"Failed to create job: {exc}",
-            "dry_run_result": None,
+        return _render(request, "submit.html", {
+            "datasets": _list_datasets(), "form": form_data,
+            "error": f"Failed to create job: {exc}", "dry_run_result": None,
         })
 
     if auto_submit or dry_run:
@@ -190,11 +168,7 @@ def job_detail(request: Request, job_id: str):
     job = _get_job(job_id)
     if not job:
         return RedirectResponse("/portal", status_code=303)
-    return templates.TemplateResponse("job_detail.html", {
-        "request": request,
-        "job": job,
-        "message": None,
-    })
+    return _render(request, "job_detail.html", {"job": job, "message": None})
 
 
 @router.post("/jobs/{job_id}/refresh")
@@ -256,10 +230,7 @@ def submit_existing_web(request: Request, job_id: str):
 
 @router.get("/connection")
 def connection_page(request: Request):
-    return templates.TemplateResponse("connection.html", {
-        "request": request,
-        "config": settings,
-    })
+    return _render(request, "connection.html", {"config": settings})
 
 
 @router.get("/connection-test")
@@ -296,11 +267,8 @@ def _list_datasets():
 
 
 def _job_fragment(request: Request, job, *, message=None, message_type="success"):
-    return templates.TemplateResponse("job_info_fragment.html", {
-        "request": request,
-        "job": job,
-        "message": message,
-        "message_type": message_type,
+    return _render(request, "job_info_fragment.html", {
+        "job": job, "message": message, "message_type": message_type,
     })
 
 
@@ -322,20 +290,13 @@ def _try_submit(request: Request, job, *, dry_run: bool):
             remote_dir=_work_dir, dry_run=dry_run,
         )
     except Exception as exc:
-        return templates.TemplateResponse("job_detail.html", {
-            "request": request,
-            "job": job,
-            "message": f"Submit failed: {exc}",
-            "message_type": "error",
+        return _render(request, "job_detail.html", {
+            "job": job, "message": f"Submit failed: {exc}", "message_type": "error",
         })
 
     if dry_run:
-        return templates.TemplateResponse("submit.html", {
-            "request": request,
-            "datasets": _list_datasets(),
-            "form": None,
-            "error": None,
-            "dry_run_result": result,
+        return _render(request, "submit.html", {
+            "datasets": _list_datasets(), "form": None, "error": None, "dry_run_result": result,
         })
 
     with connect() as conn, conn.cursor() as cur:
