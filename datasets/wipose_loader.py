@@ -293,7 +293,7 @@ class WiPoseDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = WiPoseDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/Wi-Pose/Wi-Pose",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/Wi-Pose/Wi-Pose",
         split="Test",
         layout="CTTRS",
         normalize=True,

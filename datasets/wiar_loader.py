@@ -9,13 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-# If read_csi.py is in another folder, add that folder here.
-READ_CSI_DIR = r"C:\Users\Ngan\Downloads\DEEP LEARNING PROJECT"
-
-if READ_CSI_DIR not in sys.path:
-    sys.path.append(READ_CSI_DIR)
-
-from .read_csi import load_wiar_file, ACTIVITY_LABELS
+from read_csi import load_wiar_file, ACTIVITY_LABELS
 
 
 class WiARDataset(Dataset):
@@ -363,7 +357,7 @@ class WiARDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = WiARDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/WiAR-master/WiAR-master/data/data",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/WiAR-master/WiAR-master/data/data",
         return_type="amp_phase",
         layout="CTARS",
         normalize=True,

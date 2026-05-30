@@ -310,7 +310,7 @@ class WiMANSDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = WiMANSDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/WiMANS",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/WiMANS",
         layout="CTARS",
         normalize=True,
         single_person_only=True,

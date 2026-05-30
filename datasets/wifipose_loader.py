@@ -356,7 +356,7 @@ class PersonInWiFi3DDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = PersonInWiFi3DDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/wifipose_dataset",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/wifipose_dataset",
         split="train",
         return_type="amp_phase",
         layout="CTARS",

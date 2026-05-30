@@ -322,7 +322,7 @@ class MMFiWiFiCSIDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = MMFiWiFiCSIDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/MMFi_Dataset/MMFi_Dataset",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/MMFi_Dataset/MMFi_Dataset",
         return_type="amp_phase",
         layout="CTAS",
         normalize=True,

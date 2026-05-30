@@ -207,7 +207,7 @@ class UTHARDataset(Dataset):
 
 if __name__ == "__main__":
     dataset = UTHARDataset(
-        root=r"/home/buibaongan/PROJECT/DEEP LEARNING PROJECT/UT_HAR",
+        root=r"/home/buibaongan/rf-worldpose/data/bronze/UT_HAR",
         split="test",
         layout="CTAS",
         normalize=True,
