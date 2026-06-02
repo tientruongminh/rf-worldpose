@@ -24,8 +24,6 @@ Usage:
     python transformer_train.py training.resume_from=checkpoints/epoch_10.pt
     python transformer_train.py training.dry_run=true
 
-Yêu cầu:
-    pip install torch hydra-core omegaconf mlflow einops polars pyarrow boto3
 """
 
 import os
@@ -67,20 +65,8 @@ class CSIPoseDataset(Dataset):
         - session_id:     string
         - node_id:        int (chỉ có trong multi-node schema)
 
-    Large-scale optimizations:
-        1. Index cache: scan metadata một lần, lưu JSON, tái dùng khi restart
-        2. Lazy row-group load: pl.scan_parquet().slice() chỉ đọc đúng rows cần
-        3. Multi-node: filter đúng cú pháp pl.col() thay vì df["col"]
-
-    Args:
-        data_dir:       path đến thư mục chứa Parquet files
-        window_size:    số time frames per sample (default 100 = 1 giây @ 100Hz)
-        stride:         slide stride (default 50 = 50% overlap)
-        n_subcarriers:  số subcarrier (114 HT40)
-        n_joints:       số keypoints (17 COCO)
-        n_nodes:        1 = single-node, 4 = multi-node
-        augment:        bật data augmentation
-        cache_index:    cache index ra file JSON để tránh re-scan (default True)
+    
+    Polars list column → numpy robust conversion (tránh dtype=object crash)
     """
 
     def __init__(
@@ -122,24 +108,19 @@ class CSIPoseDataset(Dataset):
             log.info(f"Loading cached index: {cache_path}")
             with open(cache_path) as f:
                 samples = json.load(f)
-            # Trả về synthetic nếu cache rỗng
             return samples if samples else self._synthetic_index()
 
         samples = self._build_index()
 
         if self.cache_index and samples and samples[0]["file"] is not None:
             with open(cache_path, "w") as f:
-                # Serialize Path -> str
                 json.dump([{**s, "file": str(s["file"])} for s in samples], f)
             log.info(f"Index cached: {cache_path} ({len(samples)} windows)")
 
         return samples
 
     def _build_index(self) -> list[dict]:
-        """
-        Scan Parquet files và build index (file, start_frame, end_frame).
-        Dùng Parquet metadata để lấy n_rows — KHÔNG load toàn bộ dữ liệu.
-        """
+        """Scan Parquet files và build index. Dùng metadata — KHÔNG load data."""
         import pyarrow.parquet as pq
 
         parquet_files = sorted(self.data_dir.glob("**/*.parquet"))
@@ -151,11 +132,9 @@ class CSIPoseDataset(Dataset):
 
         samples = []
         for fpath in parquet_files:
-            # Đọc metadata Parquet — cực nhanh, không load data
             meta     = pq.read_metadata(fpath)
             n_frames = meta.num_rows
 
-            # Multi-node: số frames thực = tổng rows / n_nodes
             if self.n_nodes > 1:
                 n_frames = n_frames // self.n_nodes
 
@@ -173,6 +152,43 @@ class CSIPoseDataset(Dataset):
         return [{"file": None, "start": i, "end": i + self.window_size} for i in range(200)]
 
     # ------------------------------------------------------------------
+    #Robust Polars column → numpy/tensor conversion
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _polars_col_to_tensor(
+        col,
+        target_shape: tuple,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """
+        Chuyển đổi Polars column → torch.Tensor robust.
+
+        Vấn đề: nếu Parquet lưu cột dạng List(Float32), col.to_numpy()
+        trả về dtype=object array of lists → torch.tensor().reshape() crash.
+
+        Solution: kiểm tra dtype, nếu List thì np.stack từng row.
+        """
+        import numpy as np
+
+        # Kiểm tra Polars List type
+        if hasattr(col, 'dtype'):
+            dt = col.dtype
+            is_list = (
+                str(dt).startswith("List")
+                or dt == type(col.dtype).__dict__.get('List', None)
+            )
+        else:
+            is_list = False
+
+        if is_list:
+            # List column → stack từng row
+            arr = np.stack(col.to_list(), axis=0)
+            return torch.tensor(arr, dtype=dtype).reshape(target_shape)
+        else:
+            # Flat column → reshape trực tiếp
+            return torch.tensor(col.to_numpy(), dtype=dtype).reshape(target_shape)
+
+    # ------------------------------------------------------------------
     # Lazy load: chỉ đọc đúng rows cần, không load cả file
     # ------------------------------------------------------------------
     def _load_window(self, fpath: str, start: int) -> dict[str, torch.Tensor]:
@@ -185,10 +201,8 @@ class CSIPoseDataset(Dataset):
         T, N, J = self.window_size, self.n_subcarriers, self.n_joints
 
         if self.n_nodes > 1:
-            # Multi-node: file có cột node_id, mỗi node có T rows
-            # Tổng rows trong window = T * n_nodes, nhưng interleaved theo node
+            # Multi-node: file có cột node_id, interleaved theo node
             # Convention Gold schema: sort theo (frame_idx, node_id)
-            # => rows [start*n_nodes : (start+T)*n_nodes]
             row_start = start * self.n_nodes
             df = (
                 pl.scan_parquet(fpath)
@@ -198,15 +212,20 @@ class CSIPoseDataset(Dataset):
 
             node_csi_list = []
             for node_id in range(self.n_nodes):
-                # Polars filter đúng cú pháp
                 node_df = df.filter(pl.col("node_id") == node_id)
-                amp_arr   = torch.tensor(node_df["csi_amplitude"].to_numpy()).reshape(T, N)
-                phase_arr = torch.tensor(node_df["csi_phase"].to_numpy()).reshape(T, N)
+
+                # Robust conversion cho CSI amplitude/phase
+                amp_arr = self._polars_col_to_tensor(
+                    node_df["csi_amplitude"], (T, N)
+                )
+                phase_arr = self._polars_col_to_tensor(
+                    node_df["csi_phase"], (T, N)
+                )
                 node_csi_list.append(torch.stack([amp_arr, phase_arr], dim=-1))
 
             csi = torch.stack(node_csi_list, dim=0)  # (n_nodes, T, N, 2)
 
-            # Pose chỉ lấy từ node_id=0 (ground truth từ camera, không phụ thuộc node)
+            # Pose chỉ lấy từ node_id=0 (ground truth từ camera)
             ref_df = df.filter(pl.col("node_id") == 0)
 
         else:
@@ -216,13 +235,24 @@ class CSIPoseDataset(Dataset):
                 .slice(start, T)
                 .collect()
             )
-            amp_arr   = torch.tensor(df["csi_amplitude"].to_numpy()).reshape(T, N)
-            phase_arr = torch.tensor(df["csi_phase"].to_numpy()).reshape(T, N)
+
+            # Robust conversion
+            amp_arr = self._polars_col_to_tensor(
+                df["csi_amplitude"], (T, N)
+            )
+            phase_arr = self._polars_col_to_tensor(
+                df["csi_phase"], (T, N)
+            )
             csi = torch.stack([amp_arr, phase_arr], dim=-1)  # (T, N, 2)
             ref_df = df
 
-        coords = torch.tensor(ref_df["pose_coords"].to_numpy()).reshape(T, J, 3)
-        vis    = torch.tensor(ref_df["pose_vis"].to_numpy()).reshape(T, J).float()
+        # Robust conversion cho pose columns
+        coords = self._polars_col_to_tensor(
+            ref_df["pose_coords"], (T, J, 3)
+        )
+        vis = self._polars_col_to_tensor(
+            ref_df["pose_vis"], (T, J)
+        )
 
         return {"csi": csi, "coords": coords, "vis": vis}
 
@@ -236,11 +266,11 @@ class CSIPoseDataset(Dataset):
         if self.n_nodes > 1:
             amplitude = torch.abs(torch.randn(self.n_nodes, T, N)) + 0.5
             phase     = torch.rand(self.n_nodes, T, N) * 2 * 3.14159 - 3.14159
-            csi = torch.stack([amplitude, phase], dim=-1)  # (n_nodes, T, N, 2)
+            csi = torch.stack([amplitude, phase], dim=-1)
         else:
             amplitude = torch.abs(torch.randn(T, N)) + 0.5
             phase     = torch.rand(T, N) * 2 * 3.14159 - 3.14159
-            csi = torch.stack([amplitude, phase], dim=-1)  # (T, N, 2)
+            csi = torch.stack([amplitude, phase], dim=-1)
 
         coords = torch.randn(T, J, 3) * 0.5
         vis    = (torch.rand(T, J) > 0.2).float()
@@ -251,17 +281,11 @@ class CSIPoseDataset(Dataset):
     # Augmentation
     # ------------------------------------------------------------------
     def _augment(self, csi: torch.Tensor, coords: torch.Tensor) -> tuple:
-        """
-        1. Gaussian noise trên CSI amplitude (simulate SNR variation)
-        2. Random temporal flip (mirror pose trong time)
-        3. Random room coordinate flip (left-right symmetric)
-        """
         if torch.rand(1) < 0.5:
             noise_std = torch.rand(1).item() * 0.05
             csi = csi + torch.randn_like(csi) * noise_std
 
         if torch.rand(1) < 0.3:
-            # flip time axis — dim 0 cho single-node (T,N,2), dim 1 cho multi-node (n,T,N,2)
             t_dim = 1 if csi.ndim == 4 else 0
             csi    = torch.flip(csi,    dims=[t_dim])
             coords = torch.flip(coords, dims=[0])
@@ -312,11 +336,13 @@ def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransfo
         n_spatial_layers=cfg.model.n_spatial_layers,
         n_temporal_layers=cfg.model.n_temporal_layers,
         n_decoder_layers=cfg.model.n_decoder_layers,
+        n_decoder_temporal_layers=cfg.model.get("n_decoder_temporal_layers", 2),
         n_joints=cfg.data.n_joints,
         predict_3d=cfg.model.predict_3d,
-        causal=cfg.model.causal,
+        causal_temporal=cfg.model.get("causal_temporal", cfg.model.get("causal", False)),
         dropout=cfg.model.dropout,
         ffn_mult=cfg.model.ffn_mult,
+        n_nodes=cfg.data.n_nodes,
     )
 
     return tokenizer, model
@@ -424,12 +450,16 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        # amp.autocast với device_type — API mới, không deprecated
         with amp.autocast(device_type=device.type, enabled=cfg.training.amp):
             tokens    = tokenizer(csi)
             out       = model(tokens)
-            pred_dict = {"coords": out["coords"], "vis": out["vis"]}
-            gt_dict   = {"coords": gt_coords,     "vis": gt_vis}
+
+            # model trả về "vis_logits" (raw), loss dùng BCEWithLogitsLoss
+            pred_dict = {
+                "coords":     out["coords"],
+                "vis_logits": out["vis_logits"],  # raw logits — KHÔNG sigmoid
+            }
+            gt_dict = {"coords": gt_coords, "vis": gt_vis}
             loss, breakdown = loss_fn(pred_dict, gt_dict)
 
         scaler.scale(loss).backward()
@@ -486,7 +516,7 @@ def eval_one_epoch(
         tokens = tokenizer(csi)
         out    = model(tokens)
 
-        pred_dict = {"coords": out["coords"], "vis": out["vis"]}
+        pred_dict = {"coords": out["coords"], "vis_logits": out["vis_logits"]}
         gt_dict   = {"coords": gt_coords,     "vis": gt_vis}
 
         _, breakdown = loss_fn(pred_dict, gt_dict)
@@ -691,7 +721,6 @@ def _export_onnx(
     B, T, N = 1, cfg.data.window_size, cfg.data.n_subcarriers
 
     # Single-node input shape cho ONNX export
-    # (multi-node inference qua separate preprocessing trước khi export)
     dummy_csi = torch.randn(B, T, N, 2).to(device)
 
     class FullModel(nn.Module):
@@ -703,7 +732,8 @@ def _export_onnx(
         def forward(self, csi):
             tokens = self.tokenizer(csi)
             out    = self.model(tokens)
-            return out["coords"], out["vis"]
+            
+            return out["coords"], out["vis_logits"]
 
     full_model = FullModel(tokenizer, model)
 
@@ -713,11 +743,11 @@ def _export_onnx(
         dummy_csi,
         "checkpoints/model.onnx",
         input_names=["csi"],
-        output_names=["coords", "vis"],
+        output_names=["coords", "vis_logits"],
         dynamic_axes={
-            "csi":    {0: "batch", 1: "time"},
-            "coords": {0: "batch", 1: "time"},
-            "vis":    {0: "batch", 1: "time"},
+            "csi":        {0: "batch", 1: "time"},
+            "coords":     {0: "batch", 1: "time"},
+            "vis_logits": {0: "batch", 1: "time"},
         },
         opset_version=17,
     )
@@ -756,9 +786,10 @@ model:
   n_spatial_layers: 4
   n_temporal_layers: 4
   n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
   ffn_mult: 4
   predict_3d: true
-  causal: false
+  causal_temporal: false
   dropout: 0.1
 
 loss:

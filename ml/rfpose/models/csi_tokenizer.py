@@ -15,19 +15,18 @@ Pipeline tokenize:
     2. Subcarrier patching:  N_sub -> N_patches = N_sub // patch_size
     3. Linear projection mỗi patch -> d_model
     4. Positional embedding (learnable) cho subcarrier axis
-    5. Temporal CLS token cho mỗi time step (optional, dùng khi pool theo thời gian)
-    6. Temporal positional embedding cho T axis
+    5. Temporal positional embedding cho T axis
+    6. Flatten -> (B, T*N_patches, d_model) cho Transformer
 """
 
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange  # pip install einops
 
 
 # ---------------------------------------------------------------------------
-# 1. Per-subcarrier normalization (chạy online, không cần fit trước)
+# 1. Per-subcarrier normalization
 # ---------------------------------------------------------------------------
 class CSIRunningNorm(nn.Module):
     """
@@ -52,7 +51,7 @@ class CSIRunningNorm(nn.Module):
         """
         if self.training:
             # Tính mean/var trên B và T axis => shape (N_sub, 2)
-            mean = x.mean(dim=(0, 1))          # (N_sub, 2)
+            mean = x.mean(dim=(0, 1))
             var  = x.var(dim=(0, 1), unbiased=False)
 
             if not self.initialized:
@@ -63,10 +62,9 @@ class CSIRunningNorm(nn.Module):
                 self.running_mean.lerp_(mean, self.momentum)
                 self.running_var.lerp_(var, self.momentum)
 
-        mean = self.running_mean  # (N_sub, 2)
+        mean = self.running_mean
         std  = (self.running_var + self.eps).sqrt()
 
-        # Broadcast: (1, 1, N_sub, 2)
         return (x - mean.unsqueeze(0).unsqueeze(0)) / std.unsqueeze(0).unsqueeze(0)
 
 
@@ -78,7 +76,6 @@ class SubcarrierPatchEmbed(nn.Module):
     Chia N_sub subcarriers thành N_patches = N_sub // patch_size nhóm,
     mỗi nhóm (patch_size * 2 features) -> d_model qua Linear.
 
-    Tại sao patch?
     - Subcarrier liền kề mang thông tin tương quan (frequency coherence)
     - Patch giảm sequence length => attention rẻ hơn O(T^2)
     - Tương tự Vision Transformer nhưng trên frequency axis thay vì spatial
@@ -98,6 +95,9 @@ class SubcarrierPatchEmbed(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        # n_subcarriers phải chia hết cho patch_size
+        # Nếu n_sub = 52 (HT20) và patch_size = 6 → 52 % 6 = 4 → ERROR
+        # Solution: dùng patch_size là ước chung, hoặc pad subcarrier
         assert n_subcarriers % patch_size == 0, (
             f"n_subcarriers ({n_subcarriers}) phải chia hết cho patch_size ({patch_size})"
         )
@@ -105,13 +105,16 @@ class SubcarrierPatchEmbed(nn.Module):
         self.n_patches = n_subcarriers // patch_size  # 114 // 6 = 19
         patch_dim = patch_size * 2  # amplitude + phase cho mỗi subcarrier trong patch
 
-        # Linear projection
+        # Linear projection: biến mỗi patch thành vector embedding
         self.proj = nn.Sequential(
             nn.Linear(patch_dim, d_model),
             nn.LayerNorm(d_model),
         )
 
         # Learnable positional embedding theo subcarrier (spatial freq position)
+        # Shape: (1, 1, n_patches, d_model)
+        #   Dim 0: batch (broadcast), Dim 1: time (broadcast)
+        #   Dim 2: patch index (learnable), Dim 3: embedding dim
         self.pos_embed = nn.Parameter(torch.zeros(1, 1, self.n_patches, d_model))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
@@ -121,37 +124,37 @@ class SubcarrierPatchEmbed(nn.Module):
         """
         x: (B, T, N_sub, 2)
         returns: (B, T, N_patches, d_model)
+
+        Chi tiết rearrange:
+          Input:  "b t (np ps) c"  — N_sub = n_patches × patch_size
+          Output: "b t np (ps c)"  — gộp patch_size subcarriers × 2 channels
+
+          Ví dụ: B=4, T=100, N_sub=114, ps=6, c=2
+            np = 114/6 = 19
+            (4, 100, 114, 2) → (4, 100, 19, 12)
         """
-        B, T, N, C = x.shape  # C = 2
+        B, T, N, C = x.shape
 
-        # Gộp [amp, phase] thành một vector rồi nhóm theo patch_size
-        # (B, T, N, 2) -> (B, T, N_patches, patch_size*2)
         x = rearrange(x, "b t (np ps) c -> b t np (ps c)", ps=self.patch_size)
-
-        # Project -> (B, T, N_patches, d_model)
         x = self.proj(x)
-
-        # Cộng positional embedding (broadcast theo B và T)
         x = x + self.pos_embed
-
         return self.dropout(x)
 
 
 # ---------------------------------------------------------------------------
-# 3. Temporal Positional Embedding
+# 3. Temporal Positional Encoding
 # ---------------------------------------------------------------------------
 class TemporalPositionalEncoding(nn.Module):
     """
     Sinusoidal encoding cho time axis T.
-    Dùng sinusoidal thay vì learnable vì T có thể thay đổi lúc inference
-    (variable-length sequence).
+    Dùng sinusoidal thay vì learnable vì T có thể thay đổi lúc inference.
     """
 
     def __init__(self, d_model: int, max_len: int = 500, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
-        pe = torch.zeros(max_len, d_model)  # (max_len, d_model)
+        pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
@@ -164,35 +167,27 @@ class TemporalPositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, T, N_patches, d_model)
-        """
+        """x: (B, T, N_patches, d_model)"""
         T = x.size(1)
         return self.dropout(x + self.pe[:, :T, :, :])
 
 
 # ---------------------------------------------------------------------------
 # 4. Multi-Node Fusion (optional - nếu có nhiều ESP32-S3)
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------#
 class MultiNodeFusion(nn.Module):
     """
     RF-WorldPose dùng 4 ESP32-S3 nodes đặt ở 4 góc phòng.
     Module này fuse CSI từ nhiều node trước khi tokenize.
 
     Strategy: cross-node attention (mỗi node là một "view")
-    Input:  list of (B, T, N_sub, 2) — một tensor mỗi node
-    Output: (B, T, N_sub, 2) — fused
-
-    Hoặc đơn giản hơn: concatenate trên subcarrier axis
     """
 
     def __init__(self, n_nodes: int = 4, n_subcarriers: int = 114, d_model: int = 256):
         super().__init__()
         self.n_nodes = n_nodes
-        # Node embedding để phân biệt từng sensor
-        self.node_embed = nn.Embedding(n_nodes, n_subcarriers * 2)  # (N_node, N_sub*2)
+        self.node_embed = nn.Embedding(n_nodes, n_subcarriers * 2)
 
-        # Attention pooling qua nodes
         self.node_attn = nn.MultiheadAttention(
             embed_dim=n_subcarriers * 2,
             num_heads=4,
@@ -206,35 +201,29 @@ class MultiNodeFusion(nn.Module):
         x: (B, n_nodes, T, N_sub, 2)  — Tensor 5D từ DataLoader
         returns: (B, T, N_sub, 2) — fused
         """
-        # Đổi trục để đưa n_nodes về vị trí xử lý: [B, T, n_nodes, N_sub, 2]
         x = x.transpose(1, 2)
         B, T, n_nodes, N, C = x.shape
 
-        # Flatten subcarrier + channel: [B, T, n_nodes, N*C]
         stacked = x.reshape(B, T, n_nodes, N * C)
 
-        # Cộng node positional embedding
         node_ids = torch.arange(self.n_nodes, device=stacked.device)
-        node_pe = self.node_embed(node_ids).unsqueeze(0).unsqueeze(0)  # (1, 1, n_nodes, N*C)
+        node_pe = self.node_embed(node_ids).unsqueeze(0).unsqueeze(0)
         stacked = stacked + node_pe
 
-        # Flatten B,T để attention hoạt động: (B*T, n_nodes, N*C)
         stacked = rearrange(stacked, "b t n d -> (b t) n d")
 
-        # Self-attention qua nodes (mỗi node attend các node khác)
         fused, _ = self.node_attn(stacked, stacked, stacked)
-        fused = self.norm(fused + stacked)  # residual
+        fused = self.norm(fused + stacked)
 
-        # Mean pool qua nodes -> (B*T, N*C) -> (B, T, N, C)
-        fused = fused.mean(dim=1)  # (B*T, N*C)
+        fused = fused.mean(dim=1)
         fused = rearrange(fused, "(b t) (n c) -> b t n c", b=B, t=T, n=N, c=C)
-
         return fused
 
 
 # ---------------------------------------------------------------------------
 # 5. CSITokenizer — tổng hợp tất cả
 # ---------------------------------------------------------------------------
+
 class CSITokenizer(nn.Module):
     """
     Full tokenization pipeline: raw CSI -> token sequence cho Transformer.
@@ -270,23 +259,21 @@ class CSITokenizer(nn.Module):
         self.n_nodes = n_nodes
         self.n_patches = n_subcarriers // patch_size
 
-        # Multi-node fusion (bỏ qua nếu single node)
         if n_nodes > 1:
             self.node_fusion = MultiNodeFusion(n_nodes, n_subcarriers, d_model)
-        else:
+        else:  
             self.node_fusion = None
 
-        self.norm       = CSIRunningNorm(n_subcarriers)
+        self.norm        = CSIRunningNorm(n_subcarriers)
         self.patch_embed = SubcarrierPatchEmbed(n_subcarriers, patch_size, d_model, dropout)
         self.temporal_pe = TemporalPositionalEncoding(d_model, max_seq_len, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, T, N_sub, 2)               — single node (4D)
-           hoặc (B, n_nodes, T, N_sub, 2) — multi-node (5D), compatible với DataLoader
+           hoặc (B, n_nodes, T, N_sub, 2) — multi-node (5D)
         returns: (B, T, N_patches, d_model)
         """
-        # Multi-node fusion nếu cần
         if self.node_fusion is not None:
             assert x.ndim == 5, (
                 f"Multi-node mode yêu cầu Tensor 5D [B, n_nodes, T, N_sub, 2], "
@@ -294,21 +281,32 @@ class CSITokenizer(nn.Module):
             )
             x = self.node_fusion(x)
 
-        # Normalize
         x = self.norm(x)           # (B, T, N_sub, 2)
-
-        # Patch embed (subcarrier axis)
         x = self.patch_embed(x)    # (B, T, N_patches, d_model)
-
-        # Temporal positional encoding
         x = self.temporal_pe(x)    # (B, T, N_patches, d_model)
-
         return x
+
+    def flatten_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Flatten (B, T, N_patches, d_model) -> (B, T*N_patches, d_model)
+        để đưa vào Transformer encoder.
+
+        Ví dụ:
+          Input:  (4, 100, 19, 256)  ← 100 frames × 19 patches
+          Output: (4, 1900, 256)     ← 1900 tokens total
+
+        Thứ tự flatten: temporal-major (row-major)
+          "b t p d -> b (t p) d"
+          → [t=0_p0, t=0_p1, ..., t=0_p18, t=1_p0, ..., t=99_p18]
+          → Các patch liền kề trong cùng frame được attend trước
+        """
+        return rearrange(x, "b t p d -> b (t p) d")
 
     @property
     def output_shape_info(self) -> dict:
         return {
             "shape": "(B, T, N_patches, d_model)",
+            "flattened": "(B, T*N_patches, d_model)",
             "n_patches": self.n_patches,
         }
 
@@ -321,13 +319,18 @@ if __name__ == "__main__":
 
     # Single-node test
     tokenizer = CSITokenizer(n_subcarriers=114, patch_size=6, d_model=256, n_nodes=1)
-    x = torch.randn(4, 100, 114, 2)  # batch=4, T=100 frames, 114 subcarriers
+    x = torch.randn(4, 100, 114, 2)
     out = tokenizer(x)
     print(f"[Single node] Input: {tuple(x.shape)} -> Output: {tuple(out.shape)}")
-    # Expected: (4, 100, 19, 256)
 
-    # Multi-node test (4 ESP32-S3) — dùng Tensor 5D như DataLoader thực tế trả về
+    tokens = tokenizer.flatten_tokens(out)
+    print(f"[Flattened]   {tuple(out.shape)} -> {tuple(tokens.shape)}")
+
+    # Multi-node test (4 ESP32-S3)
     tokenizer_multi = CSITokenizer(n_subcarriers=114, patch_size=6, d_model=256, n_nodes=4)
-    x_multi = torch.randn(4, 4, 100, 114, 2)  # [B, n_nodes, T, N_sub, 2]
+    x_multi = torch.randn(4, 4, 100, 114, 2)
     out_multi = tokenizer_multi(x_multi)
     print(f"[Multi node]  Input: {tuple(x_multi.shape)} -> Output: {tuple(out_multi.shape)}")
+
+    tokens_multi = tokenizer_multi.flatten_tokens(out_multi)
+    print(f"[Flattened]   {tuple(out_multi.shape)} -> {tuple(tokens_multi.shape)}")
