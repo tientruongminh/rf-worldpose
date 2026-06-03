@@ -94,6 +94,7 @@ def silver_csi_rows(context, bronze_dataset_roots):
         if bronze_dataset_roots["max_samples_per_dataset"] is not None
         else "all",
     )
+    t0 = time.time()
     report = bronze_to_silver(
         bronze_dataset_roots["bronze_root"],
         silver_out,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -527,6 +528,24 @@ def existing_dataset_roots(bronze_root: str | Path) -> dict[str, Path]:
     }
 
 
+
+
+def _process_single_dataset(args):
+    """Worker function for parallel dataset processing."""
+    dataset_name, dataset_root, converter_name, max_samples = args
+    converters = {
+        "wimans": iter_wimans_rows,
+        "person_in_wifi_3d": iter_person_wifi_rows,
+        "wipose": iter_wipose_rows,
+        "mmfi": iter_mmfi_rows,
+        "uthar": iter_uthar_rows,
+        "wiar": iter_wiar_rows,
+    }
+    converter = converters[converter_name]
+    rows = list(converter(Path(dataset_root), max_samples=max_samples))
+    return dataset_name, rows
+
+
 def iter_public_dataset_rows(
     bronze_root: str | Path,
     *,
@@ -928,13 +947,46 @@ def bronze_to_silver(
 
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
         log.info("  Bronze source: %s", source_report.get("source_type", "local"))
-        rows = list(
-            iter_silver_rows(
-                local_bronze_root,
-                datasets=datasets,
-                max_samples_per_dataset=max_samples_per_dataset,
-            )
-        )
+
+        # Collect self_captured rows (usually small)
+        rows = []
+        if datasets is None or "self_captured" in datasets:
+            log.info("  [self_captured] Processing ...")
+            self_rows = list(iter_json_packet_rows(local_bronze_root))
+            rows.extend(self_rows)
+            log.info("  [self_captured] Done: %d rows", len(self_rows))
+
+        # Process public datasets in parallel
+        dataset_tasks = []
+        for ds_name, ds_root in existing_dataset_roots(local_bronze_root).items():
+            if datasets is not None and ds_name not in datasets:
+                log.info("  [%s] Skipped (not in filter)", ds_name)
+                continue
+            if not ds_root.exists():
+                log.info("  [%s] Skipped (not found: %s)", ds_name, ds_root)
+                continue
+            dataset_tasks.append((ds_name, str(ds_root), ds_name, max_samples_per_dataset))
+
+        if dataset_tasks:
+            num_workers = min(len(dataset_tasks), 4)
+            log.info("  Processing %d datasets in parallel (%d workers) ...", len(dataset_tasks), num_workers)
+            with ProcessPoolExecutor(max_workers=num_workers) as pool:
+                futures = {pool.submit(_process_single_dataset, task): task[0] for task in dataset_tasks}
+                done_count = 0
+                for future in as_completed(futures):
+                    ds_name = futures[future]
+                    done_count += 1
+                    try:
+                        name, ds_rows = future.result()
+                        rows.extend(ds_rows)
+                        log.info("  [%d/%d %.0f%%] [%s] Done: %d rows",
+                                 done_count, len(dataset_tasks),
+                                 done_count / len(dataset_tasks) * 100,
+                                 name, len(ds_rows))
+                    except Exception as exc:
+                        log.error("  [%s] FAILED: %s", ds_name, exc)
+
+        log.info("  Total: %d rows from %d datasets", len(rows), len(dataset_tasks) + (1 if rows else 0))
 
     report = build_quality_report(rows)
     report["bronze_source"] = source_report
