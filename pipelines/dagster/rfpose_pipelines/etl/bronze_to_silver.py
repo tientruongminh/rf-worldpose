@@ -544,14 +544,14 @@ def iter_public_dataset_rows(
 
     for dataset_name, dataset_root in existing_dataset_roots(bronze_root).items():
         if datasets is not None and dataset_name not in datasets:
-            LOGGER.info("Skipping dataset=%s because it is not selected", dataset_name)
+            log.info("Skipping dataset=%s because it is not selected", dataset_name)
             continue
 
         if not dataset_root.exists():
-            LOGGER.info("Skipping dataset=%s because root is missing: %s", dataset_name, dataset_root)
+            log.info("Skipping dataset=%s because root is missing: %s", dataset_name, dataset_root)
             continue
 
-        LOGGER.info(
+        log.info(
             "Starting bronze-to-silver dataset=%s root=%s max_samples_per_dataset=%s",
             dataset_name,
             dataset_root,
@@ -564,7 +564,7 @@ def iter_public_dataset_rows(
         ):
             row_count += 1
             yield row
-        LOGGER.info("Finished bronze-to-silver dataset=%s rows=%d", dataset_name, row_count)
+        log.info("Finished bronze-to-silver dataset=%s rows=%d", dataset_name, row_count)
 
 
 def iter_silver_rows(
@@ -574,14 +574,14 @@ def iter_silver_rows(
     max_samples_per_dataset: int | None = None,
 ) -> Iterator[dict]:
     if datasets is None or "self_captured" in datasets:
-        LOGGER.info("Starting bronze-to-silver dataset=self_captured root=%s", bronze_root)
+        log.info("Starting bronze-to-silver dataset=self_captured root=%s", bronze_root)
         row_count = 0
         for row in iter_json_packet_rows(bronze_root):
             row_count += 1
             yield row
-        LOGGER.info("Finished bronze-to-silver dataset=self_captured rows=%d", row_count)
+        log.info("Finished bronze-to-silver dataset=self_captured rows=%d", row_count)
     else:
-        LOGGER.info("Skipping dataset=self_captured because it is not selected")
+        log.info("Skipping dataset=self_captured because it is not selected")
 
     yield from iter_public_dataset_rows(
         bronze_root,
@@ -594,14 +594,14 @@ def write_rows(rows: list[dict], silver_out: str | Path) -> None:
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-") as tmpdir:
             local_out = Path(tmpdir) / Path(str(silver_out)).name
-            LOGGER.info(
+            log.info(
                 "Writing silver rows to temporary file before S3 upload path=%s rows=%d",
                 local_out,
                 len(rows),
             )
             write_rows(rows, local_out)
             upload_report = upload_s3_file(local_out, silver_out)
-            LOGGER.info(
+            log.info(
                 "Uploaded silver rows to %s bytes=%d",
                 upload_report["uri"],
                 upload_report["bytes"],
@@ -613,11 +613,11 @@ def write_rows(rows: list[dict], silver_out: str | Path) -> None:
 
     if pl is not None and out.suffix == ".parquet":
         pl.DataFrame(rows).write_parquet(out)
-        LOGGER.info("Wrote silver parquet path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
+        log.info("Wrote silver parquet path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
         return
 
     out.write_text("\n".join(json.dumps(row) for row in rows))
-    LOGGER.info("Wrote silver jsonl path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
+    log.info("Wrote silver jsonl path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
 
 
 def build_quality_report(rows: list[dict]) -> dict:
@@ -716,7 +716,7 @@ def download_s3_prefix(
     suffixes: set[str] | None = None,
 ) -> dict:
     bucket, prefix = parse_s3_uri(s3_uri)
-    LOGGER.info(
+    log.info(
         "Starting S3 bronze staging uri=%s bucket=%s prefix=%s suffixes=%s destination=%s",
         s3_uri,
         bucket,
@@ -756,7 +756,7 @@ def download_s3_prefix(
             total_bytes += int(obj.get("Size", 0))
             latest_key = key
             if object_count % 1000 == 0:
-                LOGGER.info(
+                log.info(
                     "S3 bronze staging progress downloaded=%d skipped=%d bytes=%d latest_key=%s",
                     object_count,
                     skipped_count,
@@ -767,7 +767,7 @@ def download_s3_prefix(
     if object_count == 0:
         raise RuntimeError(f"No objects found under {s3_uri}")
 
-    LOGGER.info(
+    log.info(
         "Finished S3 bronze staging uri=%s downloaded=%d skipped=%d bytes=%d latest_key=%s",
         s3_uri,
         object_count,
@@ -791,10 +791,10 @@ def download_s3_file(s3_uri: str | Path, destination: Path) -> dict:
         raise ValueError(f"S3 input URI must include an object key: {s3_uri}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    LOGGER.info("Downloading S3 file uri=%s destination=%s", s3_uri, destination)
+    log.info("Downloading S3 file uri=%s destination=%s", s3_uri, destination)
     client = make_s3_client()
     client.download_file(bucket, key, str(destination))
-    LOGGER.info("Downloaded S3 file uri=%s bytes=%d", s3_uri, destination.stat().st_size)
+    log.info("Downloaded S3 file uri=%s bytes=%d", s3_uri, destination.stat().st_size)
     return {
         "bucket": bucket,
         "key": key,
@@ -809,9 +809,9 @@ def upload_s3_file(local_path: Path, s3_uri: str | Path) -> dict:
         raise ValueError(f"S3 output URI must include an object key: {s3_uri}")
 
     client = make_s3_client()
-    LOGGER.info("Uploading file to S3 local_path=%s uri=%s bytes=%d", local_path, s3_uri, local_path.stat().st_size)
+    log.info("Uploading file to S3 local_path=%s uri=%s bytes=%d", local_path, s3_uri, local_path.stat().st_size)
     client.upload_file(str(local_path), bucket, key)
-    LOGGER.info("Uploaded file to S3 uri=s3://%s/%s bytes=%d", bucket, key, local_path.stat().st_size)
+    log.info("Uploaded file to S3 uri=s3://%s/%s bytes=%d", bucket, key, local_path.stat().st_size)
     return {
         "bucket": bucket,
         "key": key,
@@ -824,7 +824,7 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
     bucket, prefix = parse_s3_uri(s3_uri)
     prefix = prefix.strip("/")
     client = make_s3_client()
-    LOGGER.info("Uploading directory to S3 local_dir=%s uri=%s", local_dir, s3_uri)
+    log.info("Uploading directory to S3 local_dir=%s uri=%s", local_dir, s3_uri)
 
     object_count = 0
     total_bytes = 0
@@ -838,7 +838,7 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
         object_count += 1
         total_bytes += path.stat().st_size
 
-    LOGGER.info(
+    log.info(
         "Uploaded directory to S3 uri=%s object_count=%d bytes=%d",
         s3_uri,
         object_count,
@@ -856,7 +856,7 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
 @contextmanager
 def materialized_bronze_root(bronze_root: str | Path) -> Iterator[tuple[Path, dict]]:
     if not is_s3_uri(bronze_root):
-        LOGGER.info("Using local bronze root=%s", bronze_root)
+        log.info("Using local bronze root=%s", bronze_root)
         yield Path(bronze_root), {"source_type": "local", "source_uri": str(bronze_root)}
         return
 
@@ -865,7 +865,7 @@ def materialized_bronze_root(bronze_root: str | Path) -> Iterator[tuple[Path, di
         suffixes = parse_suffix_filter(
             os.getenv("RFPOSE_S3_STAGE_EXTENSIONS", ".json,.mat,.npy,.csv,.dat")
         )
-        LOGGER.info("Materializing S3 bronze root=%s stage_extensions=%s", bronze_root, sorted(suffixes) if suffixes is not None else "all")
+        log.info("Materializing S3 bronze root=%s stage_extensions=%s", bronze_root, sorted(suffixes) if suffixes is not None else "all")
         s3_report = download_s3_prefix(
             bronze_root,
             local_root,
@@ -950,17 +950,17 @@ def bronze_to_silver(
                 else "quality_report.json"
             )
             report_uri = f"s3://{bucket}/{report_key}"
-            LOGGER.info("Uploading silver quality report uri=%s", report_uri)
+            log.info("Uploading silver quality report uri=%s", report_uri)
             upload_s3_file(report_path, report_uri)
         write_rows(rows, silver_out)
-        LOGGER.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
+        log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
         return report
 
     write_rows(rows, silver_out)
     out = Path(silver_out)
     (out.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
-    LOGGER.info("Wrote silver quality report path=%s", out.parent / "quality_report.json")
-    LOGGER.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
+    log.info("Wrote silver quality report path=%s", out.parent / "quality_report.json")
+    log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
     return report
 
 

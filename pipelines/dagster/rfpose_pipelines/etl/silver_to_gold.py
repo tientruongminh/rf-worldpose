@@ -415,7 +415,7 @@ def silver_to_gold(
     filtered_datasets = sorted(
         str(dataset) for dataset in {row.get("dataset") for row in rows}
     )
-    LOGGER.info("Filtered silver rows count=%d datasets=%s", len(rows), filtered_datasets)
+    log.info("Filtered silver rows count=%d datasets=%s", len(rows), filtered_datasets)
     grouped = group_silver_rows(rows)
     log.info("  Grouped into %d unique (dataset, sample) pairs", len(grouped))
     records_by_dataset, label_maps = build_gold_records(
@@ -423,7 +423,7 @@ def silver_to_gold(
         window_frames=window_frames,
         stride=stride,
     )
-    LOGGER.info(
+    log.info(
         "Built gold records datasets=%s sample_counts=%s",
         sorted(records_by_dataset.keys()),
         {dataset: len(records) for dataset, records in sorted(records_by_dataset.items())},
@@ -449,7 +449,7 @@ def silver_to_gold(
             upload_report = upload_s3_directory(local_gold_dir, gold_dir)
             summary["artifact_uri"] = str(gold_dir)
             summary["upload"] = upload_report
-            LOGGER.info(
+            log.info(
                 "Uploaded gold dataset directory uri=%s object_count=%d bytes=%d",
                 upload_report["uri"],
                 upload_report["object_count"],
@@ -460,7 +460,7 @@ def silver_to_gold(
             summary_path.write_text(json.dumps(summary, indent=2))
             summary_uri = f"{str(gold_dir).rstrip('/')}/summary.json"
             upload_s3_file(summary_path, summary_uri)
-            LOGGER.info("Uploaded gold summary uri=%s", summary_uri)
+            log.info("Uploaded gold summary uri=%s", summary_uri)
             return summary
 
     out = Path(gold_dir)
