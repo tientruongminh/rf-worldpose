@@ -19,3 +19,6 @@ data/gold/**
 # Next.js dashboard
 .next/
 dashboard/.next/
+.dagster/
+.tmp_dagster_home_*
+*.egg-info/

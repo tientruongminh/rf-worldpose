@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from dagster import MetadataValue, asset
@@ -48,6 +49,8 @@ def bronze_dataset_roots(context):
     bronze_root = _bronze_root()
     datasets = parse_dataset_filter(os.getenv("RFPOSE_BRONZE_DATASETS"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
+    context.log.info("[bronze_dataset_roots] root=%s, datasets=%s, max_samples=%s",
+                     bronze_root, sorted(datasets) if datasets else "all", max_samples)
 
     context.add_output_metadata(
         {
@@ -68,12 +71,23 @@ def bronze_dataset_roots(context):
 @asset
 def silver_csi_rows(context, bronze_dataset_roots):
     silver_out = _silver_path()
+    context.log.info("[silver_csi_rows] START bronze -> silver: %s -> %s",
+                     bronze_dataset_roots["bronze_root"], silver_out)
+    t0 = time.time()
     report = bronze_to_silver(
         bronze_dataset_roots["bronze_root"],
         silver_out,
         datasets=bronze_dataset_roots["datasets"],
         max_samples_per_dataset=bronze_dataset_roots["max_samples_per_dataset"],
     )
+
+    elapsed = time.time() - t0
+    if report.get("skipped"):
+        context.log.info("[silver_csi_rows] SKIPPED (output up-to-date, %d rows) in %.1fs",
+                         report["rows"], elapsed)
+    else:
+        context.log.info("[silver_csi_rows] DONE: %d rows, datasets=%s, status=%s in %.1fs",
+                         report["rows"], list(report.get("datasets", {}).keys()), report["status"], elapsed)
 
     context.add_output_metadata(
         {
@@ -93,6 +107,8 @@ def silver_csi_rows(context, bronze_dataset_roots):
 def silver_quality_report(context, silver_csi_rows):
     report = silver_csi_rows["quality"]
     passed = report["status"] == "ok" and report["rows"] > 0
+    context.log.info("[silver_quality_report] status=%s, rows=%d, passed=%s",
+                     report["status"], report["rows"], passed)
     quality = {**report, "passed": passed}
 
     context.add_output_metadata(
@@ -109,9 +125,13 @@ def silver_quality_report(context, silver_csi_rows):
 @asset
 def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
     if not silver_quality_report["passed"]:
+        context.log.error("[gold_multitask_dataset] Silver quality check FAILED, aborting")
         raise RuntimeError("Silver quality check failed; refusing to build gold dataset.")
 
     gold_dir = _gold_dir()
+    context.log.info("[gold_multitask_dataset] START silver -> gold: %s -> %s",
+                     silver_csi_rows["silver_out"], gold_dir)
+    t0 = time.time()
     datasets = parse_dataset_filter(os.getenv("RFPOSE_GOLD_DATASETS"))
     window_frames = int(os.getenv("RFPOSE_WINDOW_FRAMES", "60"))
     stride = int(os.getenv("RFPOSE_STRIDE", "10"))
@@ -125,6 +145,14 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
         stride=stride,
         max_samples_per_dataset=max_samples,
     )
+
+    elapsed = time.time() - t0
+    if summary.get("skipped"):
+        context.log.info("[gold_multitask_dataset] SKIPPED (output up-to-date, %d samples) in %.1fs",
+                         summary["num_samples"], elapsed)
+    else:
+        context.log.info("[gold_multitask_dataset] DONE: %d samples across %d datasets in %.1fs",
+                         summary["num_samples"], summary["num_datasets"], elapsed)
 
     context.add_output_metadata(
         {
@@ -143,6 +171,8 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
 
 @asset
 def gold_quality_report(context, gold_multitask_dataset):
+    context.log.info("[gold_quality_report] Validating gold output at %s",
+                     gold_multitask_dataset["gold_dir"])
     gold_dir_value = gold_multitask_dataset["gold_dir"]
     summary = gold_multitask_dataset["summary"]
     is_s3_output = gold_dir_value.startswith("s3://")
@@ -216,6 +246,8 @@ def gold_quality_report(context, gold_multitask_dataset):
 
 @asset
 def dataset_registry_entry(context, gold_multitask_dataset, gold_quality_report):
+    context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
+                     gold_quality_report["status"])
     dataset = {
         "dataset_version": os.getenv("RFPOSE_DATASET_VERSION", "rfpose-multitask-v1"),
         "artifact_uri": gold_multitask_dataset["gold_dir"],

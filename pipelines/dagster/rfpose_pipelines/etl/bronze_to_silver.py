@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 import argparse
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -37,6 +38,8 @@ from datasets.wiar_reader import index_wiar_samples, load_wiar_sample
 from datasets.wimans_reader import iter_wimans_samples, load_wimans_amp
 from datasets.wipose_reader import index_wipose_samples, load_wipose_mat
 
+
+log = logging.getLogger(__name__)
 
 SILVER_COLUMNS = {
     "dataset": None,
@@ -544,12 +547,17 @@ def iter_public_dataset_rows(
             continue
 
         if not dataset_root.exists():
+            log.info("  [%s] Not found: %s", dataset_name, dataset_root)
             continue
 
-        yield from converters[dataset_name](
-            dataset_root,
-            max_samples=max_samples_per_dataset,
-        )
+        log.info("  [%s] Processing %s ...", dataset_name, dataset_root)
+        count = 0
+        for row in converters[dataset_name](dataset_root, max_samples=max_samples_per_dataset):
+            count += 1
+            if count % 10000 == 0:
+                log.info("    [%s] %d rows ...", dataset_name, count)
+            yield row
+        log.info("  [%s] Done: %d rows", dataset_name, count)
 
 
 def iter_silver_rows(
@@ -783,6 +791,7 @@ def bronze_to_silver(
     *,
     datasets: set[str] | None = None,
     max_samples_per_dataset: int | None = None,
+    force: bool = False,
 ) -> dict:
     if datasets is None:
         datasets = parse_dataset_filter(os.getenv("RFPOSE_BRONZE_DATASETS"))
@@ -790,7 +799,23 @@ def bronze_to_silver(
     if max_samples_per_dataset is None and os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"):
         max_samples_per_dataset = int(os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"))
 
+    # --- Idempotent check ---
+    if not force and not is_s3_uri(silver_out):
+        out_path = Path(silver_out)
+        report_path = out_path.parent / "quality_report.json"
+        if out_path.exists() and report_path.exists():
+            try:
+                cached = json.loads(report_path.read_text())
+                cached["skipped"] = True
+                log.info("SKIP bronze_to_silver: output exists at %s (%d rows)", silver_out, cached.get("rows", 0))
+                return cached
+            except Exception:
+                pass
+
+    log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s)", bronze_root, silver_out, datasets)
+
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
+        log.info("  Bronze source: %s", source_report.get("source_type", "local"))
         rows = list(
             iter_silver_rows(
                 local_bronze_root,
@@ -801,6 +826,8 @@ def bronze_to_silver(
 
     report = build_quality_report(rows)
     report["bronze_source"] = source_report
+    report["skipped"] = False
+    log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s", report["rows"], list(report.get("datasets", {}).keys()), report["status"])
 
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-report-") as tmpdir:

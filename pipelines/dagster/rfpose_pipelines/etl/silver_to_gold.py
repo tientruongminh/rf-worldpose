@@ -5,6 +5,8 @@ from pathlib import Path
 import argparse
 import hashlib
 import json
+import logging
+import time
 import os
 import sys
 import tempfile
@@ -27,6 +29,8 @@ from rfpose_pipelines.etl.bronze_to_silver import (
     upload_s3_file,
 )
 
+
+log = logging.getLogger(__name__)
 
 POSE_JOINTS = [
     "head",
@@ -394,14 +398,34 @@ def silver_to_gold(
     window_frames: int = 60,
     stride: int = 10,
     max_samples_per_dataset: int | None = None,
+    force: bool = False,
 ) -> dict:
+    # --- Idempotent check ---
+    if not force and not is_s3_uri(gold_dir):
+        summary_path = Path(gold_dir) / "summary.json"
+        if summary_path.exists():
+            try:
+                cached = json.loads(summary_path.read_text())
+                cached["skipped"] = True
+                log.info("SKIP silver_to_gold: output exists at %s (%d samples)", gold_dir, cached.get("num_samples", 0))
+                return cached
+            except Exception:
+                pass
+
+    log.info("START silver_to_gold: silver=%s -> gold=%s (datasets=%s, window=%d, stride=%d)",
+             silver_path, gold_dir, datasets, window_frames, stride)
+    t0 = time.time()
+
+    log.info("  Loading silver data from %s ...", silver_path)
     rows = load_silver(silver_path)
+    log.info("  Loaded %d raw rows", len(rows))
     rows = filter_rows(
         rows,
         datasets=datasets,
         max_samples_per_dataset=max_samples_per_dataset,
     )
     grouped = group_silver_rows(rows)
+    log.info("  Grouped into %d unique (dataset, sample) pairs", len(grouped))
     records_by_dataset, label_maps = build_gold_records(
         grouped,
         window_frames=window_frames,
@@ -440,6 +464,7 @@ def silver_to_gold(
     stats_by_dataset = {}
     for dataset, records in sorted(records_by_dataset.items()):
         dataset_out = out if len(records_by_dataset) == 1 else out / dataset
+        log.info("  Writing dataset '%s': %d records -> %s", dataset, len(records), dataset_out)
         stats_by_dataset[dataset] = write_dataset(
             dataset_out,
             dataset,
@@ -460,6 +485,10 @@ def silver_to_gold(
     }
     (out / "label_maps.json").write_text(json.dumps(label_maps, indent=2, sort_keys=True))
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    summary["skipped"] = False
+    elapsed = time.time() - t0
+    log.info("DONE silver_to_gold: %d datasets, %d total samples in %.1fs",
+             summary["num_datasets"], summary["num_samples"], elapsed)
     return summary
 
 
