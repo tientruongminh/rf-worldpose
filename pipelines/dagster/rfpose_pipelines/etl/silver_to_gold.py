@@ -467,9 +467,10 @@ def silver_to_gold(
     out.mkdir(parents=True, exist_ok=True)
 
     stats_by_dataset = {}
-    for dataset, records in sorted(records_by_dataset.items()):
+    total_ds = len(records_by_dataset)
+    for ds_idx, (dataset, records) in enumerate(sorted(records_by_dataset.items()), 1):
         dataset_out = out if len(records_by_dataset) == 1 else out / dataset
-        log.info("  Writing dataset '%s': %d records -> %s", dataset, len(records), dataset_out)
+        log.info("  [%d/%d %.0f%%] Writing dataset '%s': %d records -> %s", ds_idx, total_ds, ds_idx / total_ds * 100, dataset, len(records), dataset_out)
         stats_by_dataset[dataset] = write_dataset(
             dataset_out,
             dataset,

@@ -542,7 +542,10 @@ def iter_public_dataset_rows(
         "wiar": iter_wiar_rows,
     }
 
-    for dataset_name, dataset_root in existing_dataset_roots(bronze_root).items():
+    all_datasets = list(existing_dataset_roots(bronze_root).items())
+    total_datasets = len(all_datasets)
+    active_idx = 0
+    for dataset_name, dataset_root in all_datasets:
         if datasets is not None and dataset_name not in datasets:
             log.info("Skipping dataset=%s because it is not selected", dataset_name)
             continue
