@@ -14,7 +14,7 @@ from rfpose_pipelines.jobs import data_lake_job
 
 
 def _watched_suffixes() -> set[str]:
-    value = os.getenv("RFPOSE_SENSOR_EXTENSIONS", ".json,.mat,.npy,.csv")
+    value = os.getenv("RFPOSE_SENSOR_EXTENSIONS", ".json,.mat,.npy,.csv,.dat")
     return {part.strip().lower() for part in value.split(",") if part.strip()}
 
 

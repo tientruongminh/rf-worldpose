@@ -39,7 +39,11 @@ from datasets.wimans_reader import iter_wimans_samples, load_wimans_amp
 from datasets.wipose_reader import index_wipose_samples, load_wipose_mat
 
 
+<<<<<<< HEAD
 log = logging.getLogger(__name__)
+=======
+LOGGER = logging.getLogger(__name__)
+>>>>>>> be2a557 (add log and change path)
 
 SILVER_COLUMNS = {
     "dataset": None,
@@ -544,20 +548,27 @@ def iter_public_dataset_rows(
 
     for dataset_name, dataset_root in existing_dataset_roots(bronze_root).items():
         if datasets is not None and dataset_name not in datasets:
+            LOGGER.info("Skipping dataset=%s because it is not selected", dataset_name)
             continue
 
         if not dataset_root.exists():
-            log.info("  [%s] Not found: %s", dataset_name, dataset_root)
+            LOGGER.info("Skipping dataset=%s because root is missing: %s", dataset_name, dataset_root)
             continue
 
-        log.info("  [%s] Processing %s ...", dataset_name, dataset_root)
-        count = 0
-        for row in converters[dataset_name](dataset_root, max_samples=max_samples_per_dataset):
-            count += 1
-            if count % 10000 == 0:
-                log.info("    [%s] %d rows ...", dataset_name, count)
+        LOGGER.info(
+            "Starting bronze-to-silver dataset=%s root=%s max_samples_per_dataset=%s",
+            dataset_name,
+            dataset_root,
+            max_samples_per_dataset if max_samples_per_dataset is not None else "all",
+        )
+        row_count = 0
+        for row in converters[dataset_name](
+            dataset_root,
+            max_samples=max_samples_per_dataset,
+        ):
+            row_count += 1
             yield row
-        log.info("  [%s] Done: %d rows", dataset_name, count)
+        LOGGER.info("Finished bronze-to-silver dataset=%s rows=%d", dataset_name, row_count)
 
 
 def iter_silver_rows(
@@ -567,7 +578,14 @@ def iter_silver_rows(
     max_samples_per_dataset: int | None = None,
 ) -> Iterator[dict]:
     if datasets is None or "self_captured" in datasets:
-        yield from iter_json_packet_rows(bronze_root)
+        LOGGER.info("Starting bronze-to-silver dataset=self_captured root=%s", bronze_root)
+        row_count = 0
+        for row in iter_json_packet_rows(bronze_root):
+            row_count += 1
+            yield row
+        LOGGER.info("Finished bronze-to-silver dataset=self_captured rows=%d", row_count)
+    else:
+        LOGGER.info("Skipping dataset=self_captured because it is not selected")
 
     yield from iter_public_dataset_rows(
         bronze_root,
@@ -580,8 +598,18 @@ def write_rows(rows: list[dict], silver_out: str | Path) -> None:
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-") as tmpdir:
             local_out = Path(tmpdir) / Path(str(silver_out)).name
+            LOGGER.info(
+                "Writing silver rows to temporary file before S3 upload path=%s rows=%d",
+                local_out,
+                len(rows),
+            )
             write_rows(rows, local_out)
-            upload_s3_file(local_out, silver_out)
+            upload_report = upload_s3_file(local_out, silver_out)
+            LOGGER.info(
+                "Uploaded silver rows to %s bytes=%d",
+                upload_report["uri"],
+                upload_report["bytes"],
+            )
         return
 
     out = Path(silver_out)
@@ -589,9 +617,11 @@ def write_rows(rows: list[dict], silver_out: str | Path) -> None:
 
     if pl is not None and out.suffix == ".parquet":
         pl.DataFrame(rows).write_parquet(out)
+        LOGGER.info("Wrote silver parquet path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
         return
 
     out.write_text("\n".join(json.dumps(row) for row in rows))
+    LOGGER.info("Wrote silver jsonl path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
 
 
 def build_quality_report(rows: list[dict]) -> dict:
@@ -627,6 +657,20 @@ def parse_dataset_filter(value: str | None) -> set[str] | None:
     if value is None or not value.strip():
         return None
     return {part.strip() for part in value.split(",") if part.strip()}
+
+
+def parse_suffix_filter(value: str | None) -> set[str] | None:
+    if value is None or not value.strip():
+        return None
+
+    suffixes = set()
+    for part in value.split(","):
+        suffix = part.strip().lower()
+        if not suffix:
+            continue
+        suffixes.add(suffix if suffix.startswith(".") else f".{suffix}")
+
+    return suffixes or None
 
 
 def is_s3_uri(value: str | Path) -> bool:
@@ -669,8 +713,21 @@ def make_s3_client():
     return boto3.client("s3", **kwargs)
 
 
-def download_s3_prefix(s3_uri: str | Path, destination: Path) -> dict:
+def download_s3_prefix(
+    s3_uri: str | Path,
+    destination: Path,
+    *,
+    suffixes: set[str] | None = None,
+) -> dict:
     bucket, prefix = parse_s3_uri(s3_uri)
+    LOGGER.info(
+        "Starting S3 bronze staging uri=%s bucket=%s prefix=%s suffixes=%s destination=%s",
+        s3_uri,
+        bucket,
+        prefix,
+        sorted(suffixes) if suffixes is not None else "all",
+        destination,
+    )
     client = make_s3_client()
     paginator = client.get_paginator("list_objects_v2")
     page_kwargs = {"Bucket": bucket}
@@ -678,6 +735,7 @@ def download_s3_prefix(s3_uri: str | Path, destination: Path) -> dict:
         page_kwargs["Prefix"] = f"{prefix}/"
 
     object_count = 0
+    skipped_count = 0
     total_bytes = 0
     latest_key = None
 
@@ -685,6 +743,9 @@ def download_s3_prefix(s3_uri: str | Path, destination: Path) -> dict:
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.endswith("/"):
+                continue
+            if suffixes is not None and Path(key).suffix.lower() not in suffixes:
+                skipped_count += 1
                 continue
 
             relative_key = key[len(prefix) :].lstrip("/") if prefix else key
@@ -698,14 +759,31 @@ def download_s3_prefix(s3_uri: str | Path, destination: Path) -> dict:
             object_count += 1
             total_bytes += int(obj.get("Size", 0))
             latest_key = key
+            if object_count % 1000 == 0:
+                LOGGER.info(
+                    "S3 bronze staging progress downloaded=%d skipped=%d bytes=%d latest_key=%s",
+                    object_count,
+                    skipped_count,
+                    total_bytes,
+                    latest_key,
+                )
 
     if object_count == 0:
         raise RuntimeError(f"No objects found under {s3_uri}")
 
+    LOGGER.info(
+        "Finished S3 bronze staging uri=%s downloaded=%d skipped=%d bytes=%d latest_key=%s",
+        s3_uri,
+        object_count,
+        skipped_count,
+        total_bytes,
+        latest_key,
+    )
     return {
         "bucket": bucket,
         "prefix": prefix,
         "object_count": object_count,
+        "skipped_count": skipped_count,
         "total_bytes": total_bytes,
         "latest_key": latest_key,
     }
@@ -717,8 +795,10 @@ def download_s3_file(s3_uri: str | Path, destination: Path) -> dict:
         raise ValueError(f"S3 input URI must include an object key: {s3_uri}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Downloading S3 file uri=%s destination=%s", s3_uri, destination)
     client = make_s3_client()
     client.download_file(bucket, key, str(destination))
+    LOGGER.info("Downloaded S3 file uri=%s bytes=%d", s3_uri, destination.stat().st_size)
     return {
         "bucket": bucket,
         "key": key,
@@ -733,7 +813,9 @@ def upload_s3_file(local_path: Path, s3_uri: str | Path) -> dict:
         raise ValueError(f"S3 output URI must include an object key: {s3_uri}")
 
     client = make_s3_client()
+    LOGGER.info("Uploading file to S3 local_path=%s uri=%s bytes=%d", local_path, s3_uri, local_path.stat().st_size)
     client.upload_file(str(local_path), bucket, key)
+    LOGGER.info("Uploaded file to S3 uri=s3://%s/%s bytes=%d", bucket, key, local_path.stat().st_size)
     return {
         "bucket": bucket,
         "key": key,
@@ -746,6 +828,7 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
     bucket, prefix = parse_s3_uri(s3_uri)
     prefix = prefix.strip("/")
     client = make_s3_client()
+    LOGGER.info("Uploading directory to S3 local_dir=%s uri=%s", local_dir, s3_uri)
 
     object_count = 0
     total_bytes = 0
@@ -759,6 +842,12 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
         object_count += 1
         total_bytes += path.stat().st_size
 
+    LOGGER.info(
+        "Uploaded directory to S3 uri=%s object_count=%d bytes=%d",
+        s3_uri,
+        object_count,
+        total_bytes,
+    )
     return {
         "bucket": bucket,
         "prefix": prefix,
@@ -771,16 +860,26 @@ def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
 @contextmanager
 def materialized_bronze_root(bronze_root: str | Path) -> Iterator[tuple[Path, dict]]:
     if not is_s3_uri(bronze_root):
+        LOGGER.info("Using local bronze root=%s", bronze_root)
         yield Path(bronze_root), {"source_type": "local", "source_uri": str(bronze_root)}
         return
 
     with tempfile.TemporaryDirectory(prefix="rfpose-bronze-") as tmpdir:
         local_root = Path(tmpdir)
-        s3_report = download_s3_prefix(bronze_root, local_root)
+        suffixes = parse_suffix_filter(
+            os.getenv("RFPOSE_S3_STAGE_EXTENSIONS", ".json,.mat,.npy,.csv,.dat")
+        )
+        LOGGER.info("Materializing S3 bronze root=%s stage_extensions=%s", bronze_root, sorted(suffixes) if suffixes is not None else "all")
+        s3_report = download_s3_prefix(
+            bronze_root,
+            local_root,
+            suffixes=suffixes,
+        )
         yield local_root, {
             "source_type": "s3",
             "source_uri": str(bronze_root),
             "staged_root": str(local_root),
+            "stage_extensions": sorted(suffixes) if suffixes is not None else "all",
             **s3_report,
         }
 
@@ -799,6 +898,7 @@ def bronze_to_silver(
     if max_samples_per_dataset is None and os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"):
         max_samples_per_dataset = int(os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"))
 
+<<<<<<< HEAD
     # --- Idempotent check ---
     if not force and not is_s3_uri(silver_out):
         out_path = Path(silver_out)
@@ -828,6 +928,15 @@ def bronze_to_silver(
 
     log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s)", bronze_root, silver_out, datasets)
 
+=======
+    LOGGER.info(
+        "Starting bronze_to_silver bronze_root=%s silver_out=%s datasets=%s max_samples_per_dataset=%s",
+        bronze_root,
+        silver_out,
+        sorted(datasets) if datasets else "all",
+        max_samples_per_dataset if max_samples_per_dataset is not None else "all",
+    )
+>>>>>>> be2a557 (add log and change path)
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
         log.info("  Bronze source: %s", source_report.get("source_type", "local"))
         rows = list(
@@ -840,8 +949,18 @@ def bronze_to_silver(
 
     report = build_quality_report(rows)
     report["bronze_source"] = source_report
+<<<<<<< HEAD
     report["skipped"] = False
     log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s", report["rows"], list(report.get("datasets", {}).keys()), report["status"])
+=======
+    LOGGER.info(
+        "Built silver rows rows=%d datasets=%s node_count=%d status=%s",
+        report["rows"],
+        report["datasets"],
+        report["node_count"],
+        report["status"],
+    )
+>>>>>>> be2a557 (add log and change path)
 
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-report-") as tmpdir:
@@ -854,17 +973,26 @@ def bronze_to_silver(
                 if parent_prefix
                 else "quality_report.json"
             )
-            upload_s3_file(report_path, f"s3://{bucket}/{report_key}")
+            report_uri = f"s3://{bucket}/{report_key}"
+            LOGGER.info("Uploading silver quality report uri=%s", report_uri)
+            upload_s3_file(report_path, report_uri)
         write_rows(rows, silver_out)
+        LOGGER.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
         return report
 
     write_rows(rows, silver_out)
     out = Path(silver_out)
     (out.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
+    LOGGER.info("Wrote silver quality report path=%s", out.parent / "quality_report.json")
+    LOGGER.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
     return report
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument("--bronze-root", required=True)
     parser.add_argument("--silver-out", required=True)

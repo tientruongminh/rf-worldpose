@@ -6,7 +6,10 @@ import argparse
 import hashlib
 import json
 import logging
+<<<<<<< HEAD
 import time
+=======
+>>>>>>> be2a557 (add log and change path)
 import os
 import sys
 import tempfile
@@ -30,7 +33,11 @@ from rfpose_pipelines.etl.bronze_to_silver import (
 )
 
 
+<<<<<<< HEAD
 log = logging.getLogger(__name__)
+=======
+LOGGER = logging.getLogger(__name__)
+>>>>>>> be2a557 (add log and change path)
 
 POSE_JOINTS = [
     "head",
@@ -400,6 +407,7 @@ def silver_to_gold(
     max_samples_per_dataset: int | None = None,
     force: bool = False,
 ) -> dict:
+<<<<<<< HEAD
     # --- Idempotent check ---
     if not force and not is_s3_uri(gold_dir):
         summary_path = Path(gold_dir) / "summary.json"
@@ -431,17 +439,43 @@ def silver_to_gold(
     log.info("  Loading silver data from %s ...", silver_path)
     rows = load_silver(silver_path)
     log.info("  Loaded %d raw rows", len(rows))
+=======
+    LOGGER.info(
+        "Starting silver_to_gold silver_path=%s gold_dir=%s datasets=%s window_frames=%d stride=%d max_samples_per_dataset=%s",
+        silver_path,
+        gold_dir,
+        sorted(datasets) if datasets else "all",
+        window_frames,
+        stride,
+        max_samples_per_dataset if max_samples_per_dataset is not None else "all",
+    )
+    rows = load_silver(silver_path)
+    LOGGER.info("Loaded silver rows count=%d silver_path=%s", len(rows), silver_path)
+>>>>>>> be2a557 (add log and change path)
     rows = filter_rows(
         rows,
         datasets=datasets,
         max_samples_per_dataset=max_samples_per_dataset,
     )
+    filtered_datasets = sorted(
+        str(dataset) for dataset in {row.get("dataset") for row in rows}
+    )
+    LOGGER.info("Filtered silver rows count=%d datasets=%s", len(rows), filtered_datasets)
     grouped = group_silver_rows(rows)
+<<<<<<< HEAD
     log.info("  Grouped into %d unique (dataset, sample) pairs", len(grouped))
+=======
+    LOGGER.info("Grouped silver rows stream_count=%d", len(grouped))
+>>>>>>> be2a557 (add log and change path)
     records_by_dataset, label_maps = build_gold_records(
         grouped,
         window_frames=window_frames,
         stride=stride,
+    )
+    LOGGER.info(
+        "Built gold records datasets=%s sample_counts=%s",
+        sorted(records_by_dataset.keys()),
+        {dataset: len(records) for dataset, records in sorted(records_by_dataset.items())},
     )
 
     if not records_by_dataset:
@@ -464,10 +498,18 @@ def silver_to_gold(
             upload_report = upload_s3_directory(local_gold_dir, gold_dir)
             summary["artifact_uri"] = str(gold_dir)
             summary["upload"] = upload_report
+            LOGGER.info(
+                "Uploaded gold dataset directory uri=%s object_count=%d bytes=%d",
+                upload_report["uri"],
+                upload_report["object_count"],
+                upload_report["total_bytes"],
+            )
 
             summary_path = local_gold_dir / "summary.json"
             summary_path.write_text(json.dumps(summary, indent=2))
-            upload_s3_file(summary_path, f"{str(gold_dir).rstrip('/')}/summary.json")
+            summary_uri = f"{str(gold_dir).rstrip('/')}/summary.json"
+            upload_s3_file(summary_path, summary_uri)
+            LOGGER.info("Uploaded gold summary uri=%s", summary_uri)
             return summary
 
     out = Path(gold_dir)
@@ -476,7 +518,11 @@ def silver_to_gold(
     stats_by_dataset = {}
     for dataset, records in sorted(records_by_dataset.items()):
         dataset_out = out if len(records_by_dataset) == 1 else out / dataset
+<<<<<<< HEAD
         log.info("  Writing dataset '%s': %d records -> %s", dataset, len(records), dataset_out)
+=======
+        LOGGER.info("Writing gold dataset=%s output_dir=%s records=%d", dataset, dataset_out, len(records))
+>>>>>>> be2a557 (add log and change path)
         stats_by_dataset[dataset] = write_dataset(
             dataset_out,
             dataset,
@@ -497,14 +543,27 @@ def silver_to_gold(
     }
     (out / "label_maps.json").write_text(json.dumps(label_maps, indent=2, sort_keys=True))
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
+<<<<<<< HEAD
     summary["skipped"] = False
     elapsed = time.time() - t0
     log.info("DONE silver_to_gold: %d datasets, %d total samples in %.1fs",
              summary["num_datasets"], summary["num_samples"], elapsed)
+=======
+    LOGGER.info(
+        "Finished silver_to_gold gold_dir=%s num_samples=%d num_datasets=%d",
+        gold_dir,
+        summary["num_samples"],
+        summary["num_datasets"],
+    )
+>>>>>>> be2a557 (add log and change path)
     return summary
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument("--silver-path", required=True)
     parser.add_argument("--gold-dir", required=True)

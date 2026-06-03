@@ -24,10 +24,14 @@ def _silver_path() -> str:
     )
 
 
+def _dataset_version() -> str:
+    return os.getenv("RFPOSE_DATASET_VERSION", "rfpose-multitask-v1")
+
+
 def _gold_dir() -> str:
     return os.getenv(
         "RFPOSE_GOLD_DIR",
-        f"s3://{os.getenv('S3_BUCKET', 'rfpose')}/gold/rfpose-multitask",
+        f"s3://{os.getenv('S3_BUCKET', 'rfpose')}/gold/{_dataset_version()}",
     )
 
 
@@ -49,8 +53,14 @@ def bronze_dataset_roots(context):
     bronze_root = _bronze_root()
     datasets = parse_dataset_filter(os.getenv("RFPOSE_BRONZE_DATASETS"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
-    context.log.info("[bronze_dataset_roots] root=%s, datasets=%s, max_samples=%s",
-                     bronze_root, sorted(datasets) if datasets else "all", max_samples)
+    context.log.info(
+        "Resolved bronze dataset roots bronze_root=%s datasets=%s max_samples_per_dataset=%s s3_bucket=%s s3_endpoint=%s",
+        bronze_root,
+        sorted(datasets) if datasets else "all",
+        max_samples if max_samples is not None else "all",
+        os.getenv("S3_BUCKET", "rfpose"),
+        os.getenv("S3_ENDPOINT_URL") or os.getenv("AWS_ENDPOINT_URL") or "http://207.180.243.242:9000",
+    )
 
     context.add_output_metadata(
         {
@@ -71,9 +81,15 @@ def bronze_dataset_roots(context):
 @asset
 def silver_csi_rows(context, bronze_dataset_roots):
     silver_out = _silver_path()
-    context.log.info("[silver_csi_rows] START bronze -> silver: %s -> %s",
-                     bronze_dataset_roots["bronze_root"], silver_out)
-    t0 = time.time()
+    context.log.info(
+        "Starting silver_csi_rows bronze_root=%s silver_out=%s datasets=%s max_samples_per_dataset=%s",
+        bronze_dataset_roots["bronze_root"],
+        silver_out,
+        sorted(bronze_dataset_roots["datasets"]) if bronze_dataset_roots["datasets"] else "all",
+        bronze_dataset_roots["max_samples_per_dataset"]
+        if bronze_dataset_roots["max_samples_per_dataset"] is not None
+        else "all",
+    )
     report = bronze_to_silver(
         bronze_dataset_roots["bronze_root"],
         silver_out,
@@ -100,6 +116,13 @@ def silver_csi_rows(context, bronze_dataset_roots):
             "status": MetadataValue.text(report["status"]),
         }
     )
+    context.log.info(
+        "Finished silver_csi_rows silver_out=%s rows=%d datasets=%s status=%s",
+        silver_out,
+        report["rows"],
+        report["datasets"],
+        report["status"],
+    )
     return {"silver_out": silver_out, "quality": report}
 
 
@@ -110,6 +133,12 @@ def silver_quality_report(context, silver_csi_rows):
     context.log.info("[silver_quality_report] status=%s, rows=%d, passed=%s",
                      report["status"], report["rows"], passed)
     quality = {**report, "passed": passed}
+    context.log.info(
+        "Evaluated silver quality passed=%s rows=%d status=%s",
+        passed,
+        report["rows"],
+        report["status"],
+    )
 
     context.add_output_metadata(
         {
@@ -136,6 +165,16 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
     window_frames = int(os.getenv("RFPOSE_WINDOW_FRAMES", "60"))
     stride = int(os.getenv("RFPOSE_STRIDE", "10"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
+    context.log.info(
+        "Starting gold_multitask_dataset silver_path=%s gold_dir=%s dataset_version=%s datasets=%s window_frames=%d stride=%d max_samples_per_dataset=%s",
+        silver_csi_rows["silver_out"],
+        gold_dir,
+        _dataset_version(),
+        sorted(datasets) if datasets else "all",
+        window_frames,
+        stride,
+        max_samples if max_samples is not None else "all",
+    )
 
     summary = silver_to_gold(
         silver_csi_rows["silver_out"],
@@ -165,6 +204,14 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
             "summary": _uri_metadata(f"{gold_dir.rstrip('/')}/summary.json"),
             "label_maps": _uri_metadata(f"{gold_dir.rstrip('/')}/label_maps.json"),
         }
+    )
+    context.log.info(
+        "Finished gold_multitask_dataset gold_dir=%s num_samples=%d num_datasets=%d datasets=%s upload=%s",
+        gold_dir,
+        summary["num_samples"],
+        summary["num_datasets"],
+        sorted(summary["datasets"].keys()),
+        summary.get("upload"),
     )
     return {"gold_dir": gold_dir, "summary": summary}
 
@@ -232,6 +279,13 @@ def gold_quality_report(context, gold_multitask_dataset):
         "upload": summary.get("upload"),
         "datasets": dataset_reports,
     }
+    context.log.info(
+        "Evaluated gold quality status=%s passed=%s artifact_uri=%s upload=%s",
+        quality["status"],
+        passed,
+        gold_dir_value,
+        summary.get("upload"),
+    )
 
     context.add_output_metadata(
         {
@@ -249,7 +303,7 @@ def dataset_registry_entry(context, gold_multitask_dataset, gold_quality_report)
     context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
                      gold_quality_report["status"])
     dataset = {
-        "dataset_version": os.getenv("RFPOSE_DATASET_VERSION", "rfpose-multitask-v1"),
+        "dataset_version": _dataset_version(),
         "artifact_uri": gold_multitask_dataset["gold_dir"],
         "summary": gold_multitask_dataset["summary"],
         "quality": gold_quality_report,
@@ -262,5 +316,12 @@ def dataset_registry_entry(context, gold_multitask_dataset, gold_quality_report)
             "quality_status": MetadataValue.text(gold_quality_report["status"]),
             "num_samples": gold_multitask_dataset["summary"]["num_samples"],
         }
+    )
+    context.log.info(
+        "Prepared dataset registry entry dataset_version=%s artifact_uri=%s quality_status=%s num_samples=%d",
+        dataset["dataset_version"],
+        dataset["artifact_uri"],
+        gold_quality_report["status"],
+        gold_multitask_dataset["summary"]["num_samples"],
     )
     return dataset
