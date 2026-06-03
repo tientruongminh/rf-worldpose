@@ -1,13 +1,26 @@
 # mmfi_loader.py
 
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
-import re
+from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from scipy.io import loadmat
+
+try:
+    from .mmfi_reader import (
+        index_mmfi_wifi_csi_samples,
+        load_mmfi_csi_mat,
+        load_mmfi_pose_npy,
+        mmfi_frame_to_index,
+    )
+except ImportError:  # pragma: no cover
+    from mmfi_reader import (
+        index_mmfi_wifi_csi_samples,
+        load_mmfi_csi_mat,
+        load_mmfi_pose_npy,
+        mmfi_frame_to_index,
+    )
 
 
 class MMFiWiFiCSIDataset(Dataset):
@@ -104,68 +117,11 @@ class MMFiWiFiCSIDataset(Dataset):
         self.action_to_idx = {name: idx for idx, name in enumerate(self.actions)}
 
     def _index_dataset(self) -> List[Dict]:
-        samples = []
-
-        allowed_envs = set(self.split.get("environments", []))
-        allowed_subjects = set(self.split.get("subjects", []))
-        allowed_actions = set(self.split.get("actions", []))
-
-        for env_dir in sorted(self.root.glob("E*")):
-            if not env_dir.is_dir():
-                continue
-
-            environment = env_dir.name
-            if allowed_envs and environment not in allowed_envs:
-                continue
-
-            for subject_dir in sorted(env_dir.glob("S*")):
-                if not subject_dir.is_dir():
-                    continue
-
-                subject = subject_dir.name
-                if allowed_subjects and subject not in allowed_subjects:
-                    continue
-
-                for action_dir in sorted(subject_dir.glob("A*")):
-                    if not action_dir.is_dir():
-                        continue
-
-                    action = action_dir.name
-                    if allowed_actions and action not in allowed_actions:
-                        continue
-
-                    wifi_dir = action_dir / "wifi-csi"
-                    pose_path = action_dir / "ground_truth.npy"
-
-                    if not wifi_dir.exists():
-                        continue
-
-                    if self.require_pose and not pose_path.exists():
-                        raise FileNotFoundError(
-                            f"Missing ground_truth.npy in: {action_dir}"
-                        )
-
-                    if not pose_path.exists():
-                        pose_path = None
-
-                    for mat_path in sorted(wifi_dir.glob("*.mat")):
-                        samples.append(
-                            {
-                                "path": mat_path,
-                                "pose_path": pose_path,
-                                "environment": environment,
-                                "subject": subject,
-                                "action": action,
-                                "frame": mat_path.stem,
-                            }
-                        )
-
-        if len(samples) == 0:
-            raise RuntimeError(
-                f"No MM-Fi WiFi CSI .mat files found under: {self.root}"
-            )
-
-        return samples
+        return index_mmfi_wifi_csi_samples(
+            self.root,
+            split=self.split,
+            require_pose=self.require_pose,
+        )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -173,7 +129,7 @@ class MMFiWiFiCSIDataset(Dataset):
     def __getitem__(self, index: int):
         sample = self.samples[index]
 
-        amp, phase = self._load_csi_mat(sample["path"])
+        amp, phase = load_mmfi_csi_mat(sample["path"])
         x = self._build_input_tensor(amp, phase)
 
         if self.normalize:
@@ -191,7 +147,7 @@ class MMFiWiFiCSIDataset(Dataset):
 
         if sample["pose_path"] is not None:
             poses = self._load_pose_npy(sample["pose_path"])
-            pose_index = self._frame_to_index(sample["frame"])
+            pose_index = mmfi_frame_to_index(sample["frame"])
 
             if pose_index < 0 or pose_index >= len(poses):
                 raise IndexError(
@@ -231,47 +187,11 @@ class MMFiWiFiCSIDataset(Dataset):
 
         return x, target
 
-    def _load_csi_mat(self, path: Path) -> Tuple[np.ndarray, np.ndarray]:
-        data = loadmat(path)
-
-        if "CSIamp" not in data:
-            raise KeyError(f"Missing key 'CSIamp' in file: {path}")
-
-        if "CSIphase" not in data:
-            raise KeyError(f"Missing key 'CSIphase' in file: {path}")
-
-        amp = data["CSIamp"].astype(np.float32)
-        phase = data["CSIphase"].astype(np.float32)
-
-        expected_shape = (3, 114, 10)
-
-        if amp.shape != expected_shape:
-            raise ValueError(
-                f"Unexpected CSIamp shape in {path}: {amp.shape}. "
-                f"Expected {expected_shape}."
-            )
-
-        if phase.shape != expected_shape:
-            raise ValueError(
-                f"Unexpected CSIphase shape in {path}: {phase.shape}. "
-                f"Expected {expected_shape}."
-            )
-
-        return amp, phase
-
     def _load_pose_npy(self, path: Path) -> np.ndarray:
         if path not in self.pose_cache:
-            self.pose_cache[path] = np.load(path, allow_pickle=True)
+            self.pose_cache[path] = load_mmfi_pose_npy(path)
 
         return self.pose_cache[path]
-
-    def _frame_to_index(self, frame_name: str) -> int:
-        match = re.search(r"\d+", frame_name)
-
-        if match is None:
-            raise ValueError(f"Could not extract frame number from: {frame_name}")
-
-        return int(match.group()) - 1
 
     def _build_input_tensor(self, amp: np.ndarray, phase: np.ndarray) -> np.ndarray:
         """

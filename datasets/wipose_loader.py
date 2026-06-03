@@ -1,13 +1,30 @@
 # wipose_loader.py
 
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
-import re
+from typing import Callable, Optional, Union
 
-import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+try:
+    from .wipose_reader import (
+        get_wipose_action_name,
+        get_wipose_frame_name,
+        get_wipose_split_name,
+        get_wipose_subject_name,
+        index_wipose_samples,
+        load_wipose_mat,
+    )
+except ImportError:  # pragma: no cover
+    from wipose_reader import (
+        get_wipose_action_name,
+        get_wipose_frame_name,
+        get_wipose_split_name,
+        get_wipose_subject_name,
+        index_wipose_samples,
+        load_wipose_mat,
+    )
 
 
 class WiPoseDataset(Dataset):
@@ -89,73 +106,20 @@ class WiPoseDataset(Dataset):
         self.split_to_idx = {name: idx for idx, name in enumerate(self.splits)}
         self.action_to_idx = {name: idx for idx, name in enumerate(self.actions)}
 
-    def _index_dataset(self) -> List[Dict]:
-        if self.split is None:
-            files = sorted(self.root.rglob("*.mat"))
-        else:
-            split_dir = self.root / self.split
-            files = sorted(split_dir.glob("*.mat"))
-
-        samples = []
-
-        for path in files:
-            samples.append(
-                {
-                    "path": path,
-                    "split": self._get_split_name(path),
-                    "action": self._get_action_name(path),
-                    "subject": self._get_subject_name(path),
-                    "frame": self._get_frame_name(path),
-                }
-            )
-
-        if len(samples) == 0:
-            raise RuntimeError(f"No Wi-Pose .mat files found under: {self.root}")
-
-        return samples
+    def _index_dataset(self):
+        return index_wipose_samples(self.root, self.split)
 
     def _get_split_name(self, path: Path) -> str:
-        parent = path.parent.name
-
-        if parent.lower() in {"train", "test"}:
-            return parent
-
-        return "unknown"
+        return get_wipose_split_name(path)
 
     def _get_action_name(self, path: Path) -> str:
-        stem = path.stem
-
-        # Example:
-        # wave_120-frame089 -> wave
-        # sit_down_120-frame089 -> sit_down
-        match = re.match(r"(.+)_\d+-frame\d+", stem)
-
-        if match is None:
-            return stem.split("_")[0].lower()
-
-        return match.group(1).lower()
+        return get_wipose_action_name(path)
 
     def _get_subject_name(self, path: Path) -> Optional[str]:
-        stem = path.stem
-
-        # wave_120-frame089 -> 120
-        match = re.search(r"_(\d+)-frame", stem)
-
-        if match is None:
-            return None
-
-        return match.group(1)
+        return get_wipose_subject_name(path)
 
     def _get_frame_name(self, path: Path) -> str:
-        stem = path.stem
-
-        # wave_120-frame089 -> frame089
-        match = re.search(r"(frame\d+)", stem)
-
-        if match is None:
-            return stem
-
-        return match.group(1)
+        return get_wipose_frame_name(path)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -163,7 +127,7 @@ class WiPoseDataset(Dataset):
     def __getitem__(self, index: int):
         sample = self.samples[index]
 
-        csi, pose = self._load_mat(sample["path"])
+        csi, pose = load_wipose_mat(sample["path"])
         x = self._build_input_tensor(csi)
 
         if self.normalize:
@@ -203,63 +167,6 @@ class WiPoseDataset(Dataset):
             }
 
         return x, target
-
-    def _load_mat(self, path: Path) -> Tuple[np.ndarray, np.ndarray]:
-        with h5py.File(path, "r") as data:
-            if "CSI" not in data:
-                raise KeyError(
-                    f"Missing key 'CSI' in {path}. Available keys: {list(data.keys())}"
-                )
-
-            if "SkeletonPoints" not in data:
-                raise KeyError(
-                    f"Missing key 'SkeletonPoints' in {path}. "
-                    f"Available keys: {list(data.keys())}"
-                )
-
-            csi = np.array(data["CSI"])
-            pose = np.array(data["SkeletonPoints"])
-
-        csi = self._prepare_csi(csi, path)
-        pose = self._prepare_pose(pose, path)
-
-        return csi, pose
-
-    def _prepare_csi(self, csi: np.ndarray, path: Path) -> np.ndarray:
-        csi = np.asarray(csi, dtype=np.float32)
-
-        expected_shape = (3, 3, 30, 5)
-
-        if csi.shape != expected_shape:
-            raise ValueError(
-                f"Unexpected CSI shape in {path}: {csi.shape}. "
-                f"Expected {expected_shape}."
-            )
-
-        # Add channel dimension:
-        # [tx, rx, subcarrier, time] -> [tx, rx, subcarrier, time, channel]
-        csi = csi[..., None]
-
-        return csi
-
-    def _prepare_pose(self, pose: np.ndarray, path: Path) -> np.ndarray:
-        pose = np.asarray(pose, dtype=np.float32).squeeze()
-
-        if pose.shape == (54,):
-            return pose.reshape(18, 3)
-
-        if pose.shape == (1, 54):
-            return pose.reshape(18, 3)
-
-        if pose.shape == (18, 3):
-            return pose
-
-        if pose.shape == (3, 18):
-            return pose.T
-
-        raise ValueError(
-            f"Unexpected SkeletonPoints shape in {path}: {pose.shape}"
-        )
 
     def _build_input_tensor(self, csi: np.ndarray) -> np.ndarray:
         """

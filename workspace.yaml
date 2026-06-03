@@ -1,0 +1,4 @@
+load_from:
+  - python_module:
+      module_name: rfpose_pipelines.definitions
+      working_directory: pipelines/dagster

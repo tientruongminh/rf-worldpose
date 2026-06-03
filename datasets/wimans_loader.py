@@ -3,10 +3,14 @@
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
-import csv
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+try:
+    from .wimans_reader import iter_wimans_samples, load_wimans_amp
+except ImportError:  # pragma: no cover
+    from wimans_reader import iter_wimans_samples, load_wimans_amp
 
 
 class WiMANSDataset(Dataset):
@@ -115,67 +119,11 @@ class WiMANSDataset(Dataset):
         }
 
     def _index_dataset(self) -> List[Dict]:
-        annotation_path = self.root / "annotation.csv"
-
-        if not annotation_path.exists():
-            raise FileNotFoundError(f"Missing annotation file: {annotation_path}")
-
-        samples = []
-
-        with open(annotation_path, "r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-
-            for row in reader:
-                label = row["label"].strip()
-                num_users = int(row["number_of_users"])
-
-                if self.single_person_only and num_users != 1:
-                    continue
-
-                if not self.include_empty_room and num_users == 0:
-                    continue
-
-                amp_path = self.root / "wifi_csi" / "amp" / f"{label}.npy"
-                mat_path = self.root / "wifi_csi" / "mat" / f"{label}.mat"
-                video_path = self.root / "video" / f"{label}.mp4"
-
-                if not amp_path.exists():
-                    continue
-
-                locations = []
-                activities = []
-
-                for user_idx in range(1, 7):
-                    location = row.get(f"user_{user_idx}_location", "").strip()
-                    activity = row.get(f"user_{user_idx}_activity", "").strip()
-
-                    if location:
-                        locations.append(location)
-
-                    if activity:
-                        activities.append(activity)
-
-                samples.append(
-                    {
-                        "label": label,
-                        "amp_path": amp_path,
-                        "mat_path": mat_path if mat_path.exists() else None,
-                        "video_path": video_path if video_path.exists() else None,
-                        "environment": row["environment"].strip(),
-                        "wifi_band": row["wifi_band"].strip(),
-                        "num_users": num_users,
-                        "locations": locations,
-                        "activities": activities,
-                    }
-                )
-
-        if len(samples) == 0:
-            raise RuntimeError(
-                f"No WiMANS samples found under {self.root}. "
-                f"single_person_only={self.single_person_only}"
-            )
-
-        return samples
+        return iter_wimans_samples(
+            self.root,
+            single_person_only=self.single_person_only,
+            include_empty_room=self.include_empty_room,
+        )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -183,7 +131,7 @@ class WiMANSDataset(Dataset):
     def __getitem__(self, index: int):
         sample = self.samples[index]
 
-        amp = np.load(sample["amp_path"], allow_pickle=False)
+        amp = load_wimans_amp(sample["amp_path"])
         x = self._build_input_tensor(amp)
 
         if self.max_packets is not None:

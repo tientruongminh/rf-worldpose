@@ -2,14 +2,27 @@
 
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
-import sys
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
-from read_csi import load_wiar_file, ACTIVITY_LABELS
+try:
+    from .wiar_reader import (
+        ACTIVITY_LABELS,
+        get_wiar_volunteer_name,
+        index_wiar_samples,
+        load_wiar_sample,
+        parse_wiar_filename,
+    )
+except ImportError:  # pragma: no cover
+    from wiar_reader import (
+        ACTIVITY_LABELS,
+        get_wiar_volunteer_name,
+        index_wiar_samples,
+        load_wiar_sample,
+        parse_wiar_filename,
+    )
 
 
 class WiARDataset(Dataset):
@@ -147,42 +160,7 @@ class WiARDataset(Dataset):
         }
 
     def _index_dataset(self) -> List[Dict]:
-        samples = []
-
-        allowed_volunteers = set(self.split.get("volunteers", []))
-        allowed_actions = set(self.split.get("actions", []))
-
-        for path in sorted(self.root.rglob("*.dat")):
-            parsed = self._parse_wiar_filename(path)
-
-            if parsed is None:
-                continue
-
-            activity_id, sample_id = parsed
-            volunteer = self._get_volunteer_name(path)
-
-            if allowed_volunteers and volunteer not in allowed_volunteers:
-                continue
-
-            if allowed_actions and activity_id not in allowed_actions:
-                continue
-
-            samples.append(
-                {
-                    "path": path,
-                    "volunteer": volunteer,
-                    "activity_id": activity_id,
-                    "activity_name": ACTIVITY_LABELS.get(
-                        activity_id, f"unknown_activity_{activity_id}"
-                    ),
-                    "sample_id": sample_id,
-                }
-            )
-
-        if len(samples) == 0:
-            raise RuntimeError(f"No WiAR .dat files found under: {self.root}")
-
-        return samples
+        return index_wiar_samples(self.root, split=self.split)
 
     @staticmethod
     def _parse_wiar_filename(path: Path):
@@ -190,25 +168,11 @@ class WiARDataset(Dataset):
         csi_a5_2.dat -> activity_id=5, sample_id=2
         """
 
-        import re
-
-        match = re.match(r"csi_a(\d+)_(\d+)\.dat$", path.name)
-
-        if match is None:
-            return None
-
-        activity_id = int(match.group(1))
-        sample_id = int(match.group(2))
-
-        return activity_id, sample_id
+        return parse_wiar_filename(path)
 
     @staticmethod
     def _get_volunteer_name(path: Path) -> str:
-        for part in reversed(path.parts):
-            if part.lower().startswith("volunteer"):
-                return part
-
-        return "unknown"
+        return get_wiar_volunteer_name(path)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -216,7 +180,7 @@ class WiARDataset(Dataset):
     def __getitem__(self, index: int):
         sample_info = self.samples[index]
 
-        loaded = load_wiar_file(str(sample_info["path"]))
+        loaded = load_wiar_sample(sample_info["path"])
 
         csi = loaded["csi"]
         x = self._build_input_tensor(csi)

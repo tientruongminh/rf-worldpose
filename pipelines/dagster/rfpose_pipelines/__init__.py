@@ -1,4 +1,3 @@
-from dagster import Definitions, load_assets_from_modules
-from .assets import data_lake
+from .definitions import defs
 
-defs = Definitions(assets=load_assets_from_modules([data_lake]))
+__all__ = ["defs"]

@@ -7,16 +7,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
-UT_HAR_ACTIONS = {
-    0: "lie_down",
-    1: "fall",
-    2: "walk",
-    3: "run",
-    4: "sit_down",
-    5: "stand_up",
-    6: "empty",
-}
+try:
+    from .uthar_reader import UT_HAR_ACTIONS, get_uthar_paths, load_uthar_arrays
+except ImportError:  # pragma: no cover
+    from uthar_reader import UT_HAR_ACTIONS, get_uthar_paths, load_uthar_arrays
 
 
 class UTHARDataset(Dataset):
@@ -90,42 +84,12 @@ class UTHARDataset(Dataset):
                 f"Expected one of {sorted(self.VALID_LAYOUTS)}."
             )
 
-        self.x_path = self.root / "data" / f"X_{self.split}.csv"
-        self.y_path = self.root / "label" / f"y_{self.split}.csv"
+        self.x_path, self.y_path = get_uthar_paths(self.root, self.split)
 
         self.x, self.y = self._load_arrays()
 
     def _load_arrays(self):
-        if not self.x_path.exists():
-            raise FileNotFoundError(f"Missing data file: {self.x_path}")
-
-        if not self.y_path.exists():
-            raise FileNotFoundError(f"Missing label file: {self.y_path}")
-
-        x = np.load(self.x_path, allow_pickle=False)
-        y = np.load(self.y_path, allow_pickle=False)
-
-        if x.ndim != 3:
-            raise ValueError(
-                f"Unexpected X shape: {x.shape}. Expected [N, 250, 90]."
-            )
-
-        if y.ndim != 1:
-            raise ValueError(
-                f"Unexpected y shape: {y.shape}. Expected [N]."
-            )
-
-        if len(x) != len(y):
-            raise ValueError(
-                f"X/y length mismatch: len(X)={len(x)}, len(y)={len(y)}."
-            )
-
-        if x.shape[1:] != (250, 90):
-            raise ValueError(
-                f"Unexpected X shape: {x.shape}. Expected [N, 250, 90]."
-            )
-
-        return x.astype(np.float32), y.astype(np.int64)
+        return load_uthar_arrays(self.root, self.split)
 
     def __len__(self) -> int:
         return len(self.y)
