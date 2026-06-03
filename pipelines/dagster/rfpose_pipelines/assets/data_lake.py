@@ -303,11 +303,6 @@ def gold_quality_report(context, gold_multitask_dataset):
 
 
 @asset
-<<<<<<< HEAD
-def dataset_registry_entry(context, gold_multitask_dataset, gold_quality_report):
-    context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
-                     gold_quality_report["status"])
-=======
 def dataset_registry_entry(
     context,
     bronze_dataset_roots,
@@ -315,6 +310,8 @@ def dataset_registry_entry(
     gold_multitask_dataset,
     gold_quality_report,
 ):
+    context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
+                     gold_quality_report["status"])
     dataset_version = _dataset_version()
     artifact_uri = gold_multitask_dataset["gold_dir"]
     quality_report_uri = f"{artifact_uri.rstrip('/')}/summary.json"
@@ -327,7 +324,6 @@ def dataset_registry_entry(
         gold_summary=gold_multitask_dataset["summary"],
         quality=gold_quality_report,
     )
->>>>>>> 44c450b (add postgre)
     dataset = {
         "dataset_version": dataset_version,
         "artifact_uri": artifact_uri,
