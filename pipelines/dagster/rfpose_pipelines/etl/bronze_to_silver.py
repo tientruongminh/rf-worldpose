@@ -39,11 +39,7 @@ from datasets.wimans_reader import iter_wimans_samples, load_wimans_amp
 from datasets.wipose_reader import index_wipose_samples, load_wipose_mat
 
 
-<<<<<<< HEAD
 log = logging.getLogger(__name__)
-=======
-LOGGER = logging.getLogger(__name__)
->>>>>>> be2a557 (add log and change path)
 
 SILVER_COLUMNS = {
     "dataset": None,
@@ -898,7 +894,6 @@ def bronze_to_silver(
     if max_samples_per_dataset is None and os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"):
         max_samples_per_dataset = int(os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"))
 
-<<<<<<< HEAD
     # --- Idempotent check ---
     if not force and not is_s3_uri(silver_out):
         out_path = Path(silver_out)
@@ -928,15 +923,6 @@ def bronze_to_silver(
 
     log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s)", bronze_root, silver_out, datasets)
 
-=======
-    LOGGER.info(
-        "Starting bronze_to_silver bronze_root=%s silver_out=%s datasets=%s max_samples_per_dataset=%s",
-        bronze_root,
-        silver_out,
-        sorted(datasets) if datasets else "all",
-        max_samples_per_dataset if max_samples_per_dataset is not None else "all",
-    )
->>>>>>> be2a557 (add log and change path)
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
         log.info("  Bronze source: %s", source_report.get("source_type", "local"))
         rows = list(
@@ -949,18 +935,8 @@ def bronze_to_silver(
 
     report = build_quality_report(rows)
     report["bronze_source"] = source_report
-<<<<<<< HEAD
     report["skipped"] = False
     log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s", report["rows"], list(report.get("datasets", {}).keys()), report["status"])
-=======
-    LOGGER.info(
-        "Built silver rows rows=%d datasets=%s node_count=%d status=%s",
-        report["rows"],
-        report["datasets"],
-        report["node_count"],
-        report["status"],
-    )
->>>>>>> be2a557 (add log and change path)
 
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-report-") as tmpdir:
