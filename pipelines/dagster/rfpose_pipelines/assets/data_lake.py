@@ -54,6 +54,7 @@ def _uri_metadata(value: str):
 
 @asset
 def bronze_dataset_roots(context):
+    context.log.info("[STEP 1/6] bronze_dataset_roots: resolving config ...")
     bronze_root = _bronze_root()
     datasets = parse_dataset_filter(os.getenv("RFPOSE_BRONZE_DATASETS"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
@@ -84,6 +85,7 @@ def bronze_dataset_roots(context):
 
 @asset
 def silver_csi_rows(context, bronze_dataset_roots):
+    context.log.info("[STEP 2/6] silver_csi_rows: bronze -> silver conversion (HEAVIEST STEP) ...")
     silver_out = _silver_path()
     context.log.info(
         "Starting silver_csi_rows bronze_root=%s silver_out=%s datasets=%s max_samples_per_dataset=%s",
@@ -133,6 +135,7 @@ def silver_csi_rows(context, bronze_dataset_roots):
 
 @asset
 def silver_quality_report(context, silver_csi_rows):
+    context.log.info("[STEP 3/6] silver_quality_report: validating silver output ...")
     report = silver_csi_rows["quality"]
     passed = report["status"] == "ok" and report["rows"] > 0
     context.log.info("[silver_quality_report] status=%s, rows=%d, passed=%s",
@@ -158,6 +161,7 @@ def silver_quality_report(context, silver_csi_rows):
 
 @asset
 def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
+    context.log.info("[STEP 4/6] gold_multitask_dataset: silver -> gold conversion ...")
     if not silver_quality_report["passed"]:
         context.log.error("[gold_multitask_dataset] Silver quality check FAILED, aborting")
         raise RuntimeError("Silver quality check failed; refusing to build gold dataset.")
@@ -223,6 +227,7 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
 
 @asset
 def gold_quality_report(context, gold_multitask_dataset):
+    context.log.info("[STEP 5/6] gold_quality_report: validating gold output ...")
     context.log.info("[gold_quality_report] Validating gold output at %s",
                      gold_multitask_dataset["gold_dir"])
     gold_dir_value = gold_multitask_dataset["gold_dir"]
@@ -311,6 +316,7 @@ def dataset_registry_entry(
     gold_multitask_dataset,
     gold_quality_report,
 ):
+    context.log.info("[STEP 6/6] dataset_registry_entry: registering final dataset ...")
     context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
                      gold_quality_report["status"])
     dataset_version = _dataset_version()

@@ -28,17 +28,27 @@ POSE_JOINTS = [
 
 def load_silver(path: str | Path) -> list[dict]:
     if is_s3_uri(path):
+        log.info("  [load_silver] Downloading from S3: %s ...", path)
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-in-") as tmpdir:
             local_path = Path(tmpdir) / Path(str(path)).name
             download_s3_file(path, local_path)
+            log.info("  [load_silver] Downloaded to %s (%.1f MB)", local_path, local_path.stat().st_size / 1024 / 1024)
             return load_silver(local_path)
 
     path = Path(path)
+    log.info("  [load_silver] Reading local file: %s (%.1f MB)", path, path.stat().st_size / 1024 / 1024 if path.exists() else 0)
+    t0_ls = time.time()
 
     if path.suffix == ".parquet" and pl is not None:
-        return pl.read_parquet(path).to_dicts()
+        rows = pl.read_parquet(path).to_dicts()
+        log.info("  [load_silver] Parsed %d rows from parquet in %.1fs", len(rows), time.time() - t0_ls)
+        return rows
 
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    lines = path.read_text().splitlines()
+    log.info("  [load_silver] Read %d lines, parsing JSON ...", len(lines))
+    rows = [json.loads(line) for line in lines if line.strip()]
+    log.info("  [load_silver] Parsed %d rows in %.1fs", len(rows), time.time() - t0_ls)
+    return rows
 
 
 def parse_dataset_filter(value: str | None) -> set[str] | None:
@@ -97,13 +107,24 @@ def infer_n_subcarriers(rows: list[dict]) -> int:
 
 
 def group_silver_rows(rows: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    log.info("  [group] Grouping %d rows by (dataset, sample_id) ...", len(rows))
+    t0_gr = time.time()
     grouped = defaultdict(list)
+    skipped_no_id = 0
+    skipped_no_amp = 0
     for row in rows:
         if not row.get("dataset") or not row.get("sample_id"):
+            skipped_no_id += 1
             continue
         if not row.get("amplitude"):
+            skipped_no_amp += 1
             continue
         grouped[(row["dataset"], str(row["sample_id"]))].append(row)
+    ds_counts = defaultdict(int)
+    for (ds, _) in grouped:
+        ds_counts[ds] += 1
+    log.info("  [group] %d unique (dataset, sample) pairs in %.1fs | per-dataset: %s | skipped: no_id=%d no_amp=%d",
+             len(grouped), time.time() - t0_gr, dict(sorted(ds_counts.items())), skipped_no_id, skipped_no_amp)
     return dict(grouped)
 
 
@@ -197,7 +218,12 @@ def build_gold_records(
     }
     records_by_dataset = defaultdict(list)
 
+    total_pairs = len(grouped)
+    log.info("  [build_gold] Processing %d (dataset, sample) pairs into windowed records ...", total_pairs)
+    t0_bg = time.time()
+    pair_idx = 0
     for (dataset, sample_id), rows in sorted(grouped.items()):
+        pair_idx += 1
         rows = sorted(rows, key=lambda row: (int(row["timestamp_us"]), int(row["node_id"])))
         first = rows[0]
         sample_key = f"{dataset}:{sample_id}"
@@ -232,6 +258,10 @@ def build_gold_records(
                     "subject_mask": int(subject_id >= 0),
                 }
             )
+        if pair_idx % 50 == 0 or pair_idx == total_pairs:
+            total_recs = sum(len(v) for v in records_by_dataset.values())
+            log.info("  [build_gold] Pair %d/%d (%.0f%%) | %d total windows so far | %.1fs",
+                     pair_idx, total_pairs, pair_idx / total_pairs * 100, total_recs, time.time() - t0_bg)
 
     return dict(records_by_dataset), label_maps
 
@@ -288,8 +318,17 @@ def write_dataset(
         dtype=object,
     )
 
+    log.info("    [write_dataset/%s] Converting %d records to arrays ...", dataset, len(records))
+    t0_wd = time.time()
     all_arrays = records_to_arrays(records, label_maps)
+    log.info("    [write_dataset/%s] Arrays built: X=%s (%.1f MB) | pose=%s | in %.1fs",
+             dataset, list(all_arrays["X"].shape),
+             all_arrays["X"].nbytes / 1024 / 1024,
+             list(all_arrays["pose"].shape),
+             time.time() - t0_wd)
+    log.info("    [write_dataset/%s] Writing x.npz ...", dataset)
     np.savez_compressed(out / "x.npz", X=all_arrays["X"])
+    log.info("    [write_dataset/%s] Writing y.npz ...", dataset)
     np.savez_compressed(
         out / "y.npz",
         pose=all_arrays["pose"],
@@ -304,6 +343,7 @@ def write_dataset(
         subject_id=all_arrays["subject_id"],
         subject_mask=all_arrays["subject_mask"],
     )
+    log.info("    [write_dataset/%s] Writing metadata.npz ...", dataset)
     np.savez_compressed(out / "metadata.npz", metadata=metadata)
 
     split_counts = defaultdict(int)
@@ -349,8 +389,13 @@ def filter_rows(
     datasets: set[str] | None,
     max_samples_per_dataset: int | None,
 ) -> list[dict]:
+    before = len(rows)
     if datasets is not None:
         rows = [row for row in rows if row.get("dataset") in datasets]
+        log.info("  [filter_rows] Dataset filter: %d -> %d rows (kept datasets: %s)", before, len(rows), sorted(datasets))
+    else:
+        all_ds = sorted({row.get("dataset") for row in rows})
+        log.info("  [filter_rows] No dataset filter, all datasets: %s (%d rows)", all_ds, len(rows))
 
     if max_samples_per_dataset is None:
         return rows
@@ -364,6 +409,7 @@ def filter_rows(
             continue
         seen[dataset].add(sample_id)
         filtered.append(row)
+    log.info("  [filter_rows] Max samples filter (%d/ds): %d -> %d rows", max_samples_per_dataset, len(rows), len(filtered))
     return filtered
 
 

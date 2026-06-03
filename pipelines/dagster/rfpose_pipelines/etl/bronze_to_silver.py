@@ -8,6 +8,7 @@ from typing import Iterable, Iterator
 import argparse
 import json
 import logging
+import time
 import os
 import sys
 import tempfile
@@ -266,11 +267,19 @@ def decode_packet_record(packet: dict, deployment_id: str, source_file: str) -> 
 
 
 def iter_json_packet_rows(bronze_root: str | Path) -> Iterator[dict]:
-    for file in iter_bronze_batches(bronze_root):
+    files = list(iter_bronze_batches(bronze_root))
+    log.info("    [self_captured] Found %d JSON batch files in %s", len(files), bronze_root)
+    row_count = 0
+    for fi, file in enumerate(files, 1):
         obj = json.loads(file.read_text())
         deployment_id = obj.get("deployment_id", "unknown")
-        for packet in obj.get("packets", []):
+        packets = obj.get("packets", [])
+        for packet in packets:
+            row_count += 1
             yield decode_packet_record(packet, deployment_id, str(file))
+        if fi % 10 == 0 or fi == len(files):
+            log.info("    [self_captured] File %d/%d (%.0f%%) | %d rows so far | %s",
+                     fi, len(files), fi / len(files) * 100, row_count, file.name[:30])
 
 
 def iter_wimans_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
@@ -328,15 +337,20 @@ def iter_person_wifi_rows(root: Path, max_samples: int | None = None) -> Iterato
     for split in ("train", "test"):
         split_dir = root / f"{split}_data"
         if not split_dir.exists():
+            log.info("    [person_in_wifi_3d] Split %s dir not found, skip", split)
             continue
 
-        samples = index_person_wifi_samples(
+        samples = list(index_person_wifi_samples(
             root,
             split=split,
             single_person_only=False,
-        )
+        ))
+        total = min(len(samples), max_samples) if max_samples else len(samples)
+        log.info("    [person_in_wifi_3d] Split=%s found %d samples (processing %d)", split, len(samples), total)
+        t0_pw = time.time()
+        row_count = 0
 
-        for sample in limit_samples(samples, max_samples):
+        for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
             csi = load_person_wifi_csi_mat(sample["csi_path"])
             keypoint = load_person_wifi_keypoint_npy(
                 sample["keypoint_path"],
@@ -354,6 +368,7 @@ def iter_person_wifi_rows(root: Path, max_samples: int | None = None) -> Iterato
             for t in range(time_steps):
                 for ant1 in range(ant1_count):
                     for ant2 in range(ant2_count):
+                        row_count += 1
                         yield make_silver_row(
                             dataset="person_in_wifi_3d",
                             sample_id=sample["name"],
@@ -371,12 +386,19 @@ def iter_person_wifi_rows(root: Path, max_samples: int | None = None) -> Iterato
                             pose_path=str(sample["keypoint_path"]),
                             **pose_fields(common_pose),
                         )
+            if si % 5 == 0 or si == total:
+                log.info("    [person_in_wifi_3d/%s] Sample %d/%d (%.0f%%) | %d rows | %.1fs",
+                         split, si, total, si/total*100, row_count, time.time()-t0_pw)
 
 
 def iter_wipose_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
-    samples = index_wipose_samples(root)
+    samples = list(index_wipose_samples(root))
+    total = min(len(samples), max_samples) if max_samples else len(samples)
+    log.info("    [wipose] Found %d samples (processing %d)", len(samples), total)
+    row_count = 0
+    t0_wp = time.time()
 
-    for sample in limit_samples(samples, max_samples):
+    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
         csi, pose = load_wipose_mat(sample["path"])
         common_pose = select_common_pose_joints(
             pose,
@@ -408,9 +430,13 @@ def iter_wipose_rows(root: Path, max_samples: int | None = None) -> Iterator[dic
 
 
 def iter_mmfi_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
-    samples = index_mmfi_wifi_csi_samples(root, require_pose=False)
+    samples = list(index_mmfi_wifi_csi_samples(root, require_pose=False))
+    total = min(len(samples), max_samples) if max_samples else len(samples)
+    log.info("    [mmfi] Found %d samples (processing %d)", len(samples), total)
+    row_count = 0
+    t0_mm = time.time()
 
-    for sample in limit_samples(samples, max_samples):
+    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
         amp, phase = load_mmfi_csi_mat(sample["path"])
         antenna_count, n_subcarriers, time_steps = amp.shape
         pose_index = (
@@ -460,6 +486,7 @@ def iter_uthar_rows(root: Path, max_samples: int | None = None) -> Iterator[dict
     for split in ("train", "val", "test"):
         x, y = load_uthar_arrays(root, split)
         sample_count = len(y) if max_samples is None else min(len(y), max_samples)
+        log.info("    [uthar/%s] %d total samples, processing %d", split, len(y), sample_count)
 
         for sample_idx in range(sample_count):
             sample = x[sample_idx].reshape(250, 3, 30)
@@ -485,9 +512,13 @@ def iter_uthar_rows(root: Path, max_samples: int | None = None) -> Iterator[dict
 
 
 def iter_wiar_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
-    samples = index_wiar_samples(root)
+    samples = list(index_wiar_samples(root))
+    total = min(len(samples), max_samples) if max_samples else len(samples)
+    log.info("    [wiar] Found %d samples (processing %d)", len(samples), total)
+    row_count = 0
+    t0_wi = time.time()
 
-    for sample in limit_samples(samples, max_samples):
+    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
         loaded = load_wiar_sample(sample["path"])
         csi = loaded["csi"]
         time_steps, n_subcarriers, rx_count, tx_count = csi.shape
@@ -542,7 +573,12 @@ def _process_single_dataset(args):
         "wiar": iter_wiar_rows,
     }
     converter = converters[converter_name]
+    t0 = time.time()
+    log.info("    [%s] WORKER START root=%s max_samples=%s", dataset_name, dataset_root, max_samples)
     rows = list(converter(Path(dataset_root), max_samples=max_samples))
+    elapsed = time.time() - t0
+    log.info("    [%s] WORKER DONE: %d rows in %.1fs (%.0f rows/s)",
+             dataset_name, len(rows), elapsed, len(rows) / max(elapsed, 0.01))
     return dataset_name, rows
 
 
@@ -638,13 +674,20 @@ def write_rows(rows: list[dict], silver_out: str | Path) -> None:
         log.info("Wrote silver parquet path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
         return
 
+    log.info("  [write_rows] Writing %d rows to %s ...", len(rows), out)
+    t0_wr = time.time()
     out.write_text("\n".join(json.dumps(row) for row in rows))
-    log.info("Wrote silver jsonl path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
+    elapsed_wr = time.time() - t0_wr
+    size_mb = out.stat().st_size / 1024 / 1024
+    log.info("  [write_rows] Done: %d rows, %.1f MB, %.1fs (%.1f MB/s)", len(rows), size_mb, elapsed_wr, size_mb / max(elapsed_wr, 0.01))
 
 
 def build_quality_report(rows: list[dict]) -> dict:
+    log.info("  [quality_report] Building from %d rows ...", len(rows))
+    t0_qr = time.time()
     node_ids = sorted({row["node_id"] for row in rows if row.get("node_id") is not None})
     datasets = Counter(row["dataset"] for row in rows)
+    log.info("  [quality_report] %d unique nodes, datasets: %s", len(node_ids), dict(datasets))
     seq_drops = 0
     seqs_by_stream = defaultdict(list)
 
@@ -757,6 +800,15 @@ def download_s3_prefix(
     total_bytes = 0
     latest_key = None
 
+    # Pre-scan: count total objects for progress
+    total_objects = 0
+    for count_page in paginator.paginate(**page_kwargs):
+        for obj in count_page.get("Contents", []):
+            if not obj["Key"].endswith("/"):
+                total_objects += 1
+    log.info("  [S3 scan] Found %d total objects in s3://%s/%s", total_objects, bucket, prefix or "")
+
+    dl_start = time.time()
     for page in paginator.paginate(**page_kwargs):
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -777,13 +829,15 @@ def download_s3_prefix(
             object_count += 1
             total_bytes += int(obj.get("Size", 0))
             latest_key = key
-            if object_count % 1000 == 0:
+            if object_count % 50 == 0 or object_count == total_objects:
+                elapsed = time.time() - dl_start
+                speed_mb = (total_bytes / 1024 / 1024) / max(elapsed, 0.01)
+                pct = object_count / max(total_objects, 1) * 100
+                eta = (elapsed / object_count) * (total_objects - object_count) if object_count > 0 else 0
                 log.info(
-                    "S3 bronze staging progress downloaded=%d skipped=%d bytes=%d latest_key=%s",
-                    object_count,
-                    skipped_count,
-                    total_bytes,
-                    latest_key,
+                    "  [S3 download] %d/%d (%.0f%%) | %.1f MB | %.2f MB/s | ETA %.0fs | %s",
+                    object_count, total_objects, pct, total_bytes / 1024 / 1024,
+                    speed_mb, eta, key.split("/")[-1][:40],
                 )
 
     if object_count == 0:
