@@ -411,6 +411,18 @@ def silver_to_gold(
                 return cached
             except Exception:
                 pass
+    elif not force and is_s3_uri(gold_dir):
+        try:
+            bucket, prefix = parse_s3_uri(gold_dir)
+            summary_key = f"{prefix.rstrip('/')}/summary.json"
+            client = make_s3_client()
+            resp = client.get_object(Bucket=bucket, Key=summary_key)
+            cached = json.loads(resp["Body"].read().decode())
+            cached["skipped"] = True
+            log.info("SKIP silver_to_gold: S3 output exists at %s (%d samples)", gold_dir, cached.get("num_samples", 0))
+            return cached
+        except Exception:
+            pass
 
     log.info("START silver_to_gold: silver=%s -> gold=%s (datasets=%s, window=%d, stride=%d)",
              silver_path, gold_dir, datasets, window_frames, stride)

@@ -811,6 +811,20 @@ def bronze_to_silver(
                 return cached
             except Exception:
                 pass
+    elif not force and is_s3_uri(silver_out):
+        try:
+            bucket, key = parse_s3_uri(silver_out)
+            client = make_s3_client()
+            client.head_object(Bucket=bucket, Key=key)
+            parent_prefix = key.rsplit("/", 1)[0] if "/" in key else ""
+            report_key = f"{parent_prefix}/quality_report.json" if parent_prefix else "quality_report.json"
+            resp = client.get_object(Bucket=bucket, Key=report_key)
+            cached = json.loads(resp["Body"].read().decode())
+            cached["skipped"] = True
+            log.info("SKIP bronze_to_silver: S3 output exists at %s (%d rows)", silver_out, cached.get("rows", 0))
+            return cached
+        except Exception:
+            pass
 
     log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s)", bronze_root, silver_out, datasets)
 
