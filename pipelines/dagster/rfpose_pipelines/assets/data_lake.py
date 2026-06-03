@@ -8,6 +8,10 @@ from dagster import MetadataValue, asset
 
 from rfpose_pipelines.etl.bronze_to_silver import bronze_to_silver
 from rfpose_pipelines.etl.silver_to_gold import parse_dataset_filter, silver_to_gold
+from rfpose_pipelines.metadata_registry import (
+    build_dataset_metadata,
+    upsert_dataset_version,
+)
 
 
 def _optional_int_env(name: str) -> int | None:
@@ -299,29 +303,74 @@ def gold_quality_report(context, gold_multitask_dataset):
 
 
 @asset
+<<<<<<< HEAD
 def dataset_registry_entry(context, gold_multitask_dataset, gold_quality_report):
     context.log.info("[dataset_registry_entry] Registering dataset: quality=%s",
                      gold_quality_report["status"])
+=======
+def dataset_registry_entry(
+    context,
+    bronze_dataset_roots,
+    silver_csi_rows,
+    gold_multitask_dataset,
+    gold_quality_report,
+):
+    dataset_version = _dataset_version()
+    artifact_uri = gold_multitask_dataset["gold_dir"]
+    quality_report_uri = f"{artifact_uri.rstrip('/')}/summary.json"
+    stats = build_dataset_metadata(
+        dataset_version=dataset_version,
+        bronze_uri=bronze_dataset_roots["bronze_root"],
+        silver_uri=silver_csi_rows["silver_out"],
+        gold_uri=artifact_uri,
+        silver_report=silver_csi_rows["quality"],
+        gold_summary=gold_multitask_dataset["summary"],
+        quality=gold_quality_report,
+    )
+>>>>>>> 44c450b (add postgre)
     dataset = {
-        "dataset_version": _dataset_version(),
-        "artifact_uri": gold_multitask_dataset["gold_dir"],
+        "dataset_version": dataset_version,
+        "artifact_uri": artifact_uri,
         "summary": gold_multitask_dataset["summary"],
         "quality": gold_quality_report,
+        "metadata": stats,
+        "quality_report_uri": quality_report_uri,
     }
+
+    upsert_dataset_version(
+        dataset_version=dataset_version,
+        artifact_uri=artifact_uri,
+        quality_report_uri=quality_report_uri,
+        stats=stats,
+        preprocess_version=silver_csi_rows["quality"].get(
+            "schema_version", "silver_csi_v1"
+        ),
+        source_sessions=[],
+        teacher_version=os.getenv("RFPOSE_TEACHER_VERSION"),
+        created_by=os.getenv("RFPOSE_CREATED_BY", "dagster"),
+    )
 
     context.add_output_metadata(
         {
             "dataset_version": dataset["dataset_version"],
             "artifact_uri": _uri_metadata(dataset["artifact_uri"]),
+            "quality_report_uri": _uri_metadata(dataset["quality_report_uri"]),
             "quality_status": MetadataValue.text(gold_quality_report["status"]),
             "num_samples": gold_multitask_dataset["summary"]["num_samples"],
+            "rows_count": stats["rows_count"],
+            "node_count": stats["node_count"],
+            "window_frames": stats["window_frames"],
+            "stride": stats["stride"],
+            "splits": MetadataValue.json(stats["splits"]),
         }
     )
     context.log.info(
-        "Prepared dataset registry entry dataset_version=%s artifact_uri=%s quality_status=%s num_samples=%d",
+        "Upserted dataset registry entry dataset_version=%s artifact_uri=%s quality_report_uri=%s quality_status=%s rows=%d num_samples=%d",
         dataset["dataset_version"],
         dataset["artifact_uri"],
+        dataset["quality_report_uri"],
         gold_quality_report["status"],
+        stats["rows_count"],
         gold_multitask_dataset["summary"]["num_samples"],
     )
     return dataset
