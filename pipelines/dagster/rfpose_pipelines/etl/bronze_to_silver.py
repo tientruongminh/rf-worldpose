@@ -1119,15 +1119,21 @@ def bronze_to_silver(
         log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, report["rows"])
         return report
 
-    # Local: convert to parquet if possible, otherwise just move the jsonl
+    # Local: convert to parquet using streaming (sink_parquet) to avoid OOM
     if pl is not None and out.suffix == ".parquet":
-        log.info("  Converting streamed JSONL to parquet ...")
+        log.info("  Converting streamed JSONL to parquet (streaming) ...")
         t0_pq = time.time()
-        df = pl.read_ndjson(tmp_jsonl)
-        df.write_parquet(out)
-        log.info("  Wrote parquet: %s (%d rows, %.1f MB) in %.1fs",
-                 out, len(df), out.stat().st_size / 1024 / 1024, time.time() - t0_pq)
-        del df
+        try:
+            pl.scan_ndjson(tmp_jsonl).sink_parquet(out)
+            elapsed_pq = time.time() - t0_pq
+            log.info("  Wrote parquet (streaming): %s (%.1f MB) in %.1fs",
+                     out, out.stat().st_size / 1024 / 1024, elapsed_pq)
+        except Exception as e:
+            log.warning("  scan_ndjson().sink_parquet() failed (%s), falling back to chunked read ...", e)
+            import shutil
+            out_jsonl = out.with_suffix(".jsonl")
+            shutil.move(str(tmp_jsonl), str(out_jsonl))
+            log.info("  Saved as JSONL instead: %s (%.1f MB)", out_jsonl, out_jsonl.stat().st_size / 1024 / 1024)
     else:
         import shutil
         shutil.move(str(tmp_jsonl), str(out))
