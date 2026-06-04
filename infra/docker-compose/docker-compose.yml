@@ -132,7 +132,7 @@ services:
       <<: [*db-url, *postgres-env, *s3-env]
       DAGSTER_HOME: /app/.dagster
       RFPOSE_BRONZE_ROOT: /app/data/bronze
-      RFPOSE_SILVER_OUT: /app/data/silver/csi_decoded.parquet
+      RFPOSE_SILVER_OUT: /app/data/silver
       RFPOSE_GOLD_DIR: /app/data/gold/rfpose-multitask-v1
     ports: ["3004:3001"]
     volumes: ["../../:/app"]

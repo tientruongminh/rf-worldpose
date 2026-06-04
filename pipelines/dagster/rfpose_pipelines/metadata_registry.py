@@ -77,7 +77,7 @@ def build_dataset_metadata(
         "silver_uri": silver_uri,
         "gold_uri": gold_uri,
         "artifact_uri": gold_uri,
-        "rows_count": int(silver_report.get("rows", 0)),
+        "rows_count": int(silver_report.get("samples", silver_report.get("rows", 0))),
         "node_count": int(silver_report.get("node_count", 0)),
         "num_samples": int(gold_summary.get("num_samples", 0)),
         "num_datasets": int(gold_summary.get("num_datasets", 0)),

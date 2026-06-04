@@ -1,7 +1,12 @@
+"""Bronze → Silver ETL: one row per sample, CSI saved as .npy binary.
+
+Silver output is a directory containing:
+  - catalog.parquet: metadata for each sample (1 row = 1 sample)
+  - csi/<dataset>/<sample_id>.npy: CSI tensor per sample
+"""
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -44,108 +49,44 @@ from datasets.wipose_reader import index_wipose_samples, load_wipose_mat
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-SILVER_COLUMNS = {
-    "dataset": None,
-    "deployment_id": None,
-    "sample_id": None,
-    "split": None,
-    "source_file": None,
-    "buffer_id": None,
-    "received_at_ms": None,
-    "frame_id": None,
-    "timestamp_us": None,
-    "node_id": None,
-    "node_key": None,
-    "tx": None,
-    "rx": None,
-    "antenna": None,
-    "seq": None,
-    "rssi": None,
-    "noise_floor": None,
-    "channel": None,
-    "n_subcarriers": None,
-    "firmware_version": None,
-    "amplitude": None,
-    "phase": None,
-    "crc32": None,
-    "activity": None,
-    "activity_id": None,
-    "subject": None,
-    "subject_key": None,
-    "environment": None,
-    "environment_key": None,
-    "location": None,
-    "location_key": None,
-    "num_users": None,
-    "pose_path": None,
-    "pose_index": None,
-    "pose": None,
-    "pose_joints": None,
-    "pose_dim": None,
-    "has_pose": False,
-    "metadata_json": None,
-}
+# ---------------------------------------------------------------------------
+# Common pose mapping
+# ---------------------------------------------------------------------------
 
 COMMON_POSE_JOINTS = [
-    "head",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-    "left_wrist",
-    "right_wrist",
-    "left_hip",
-    "right_hip",
-    "left_knee",
-    "right_knee",
-    "left_ankle",
-    "right_ankle",
+    "head", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+    "left_hip", "right_hip", "left_knee", "right_knee",
+    "left_ankle", "right_ankle",
 ]
 
-# MMFi is treated as COCO-17 style:
-# nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles.
 MMFI_TO_COMMON = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-
-# Wi-Pose is AlphaPose/OpenPose-like:
-# nose, neck, right body side, left body side, eyes, ears.
 WIPOSE_TO_COMMON = [0, 5, 2, 6, 3, 7, 4, 11, 8, 12, 9, 13, 10]
-
-# Person-in-WiFi-3D is assumed:
-# head, neck, right body side, left body side.
 PERSON_WIFI_TO_COMMON = [0, 5, 2, 6, 3, 7, 4, 11, 8, 12, 9, 13, 10]
 
 ACTIVITY_ALIASES = {
-    "sitdown": "sit_down",
-    "sit_down": "sit_down",
-    "standup": "stand_up",
-    "stand_up": "stand_up",
-    "pick_up": "pick_up",
-    "picking_up_things": "pick_up",
-    "jump": "jump",
-    "jumping_up": "jump",
-    "throw": "throw",
-    "throwing_left_side": "throw",
-    "throwing_right_side": "throw",
-    "high_throw": "throw",
-    "wave": "wave",
-    "waving_hand_left": "wave",
-    "waving_hand_right": "wave",
-    "horizontal_arm_wave": "wave",
-    "high_arm_wave": "wave",
-    "two_hands_wave": "wave",
-    "forward_kick": "kick",
-    "side_kick": "kick",
-    "kicking_left_side": "kick",
-    "kicking_right_side": "kick",
-    "squat": "squat",
-    "crouch": "squat",
-    "bend": "bend",
-    "bowing": "bend",
-    "walk": "walk",
-    "run": "run",
-    "fall": "fall",
-    "lie_down": "lie_down",
+    "sitdown": "sit_down", "sit_down": "sit_down",
+    "standup": "stand_up", "stand_up": "stand_up",
+    "pick_up": "pick_up", "picking_up_things": "pick_up",
+    "jump": "jump", "jumping_up": "jump",
+    "throw": "throw", "throwing_left_side": "throw",
+    "throwing_right_side": "throw", "high_throw": "throw",
+    "wave": "wave", "waving_hand_left": "wave",
+    "waving_hand_right": "wave", "horizontal_arm_wave": "wave",
+    "high_arm_wave": "wave", "two_hands_wave": "wave",
+    "forward_kick": "kick", "side_kick": "kick",
+    "kicking_left_side": "kick", "kicking_right_side": "kick",
+    "squat": "squat", "crouch": "squat",
+    "bend": "bend", "bowing": "bend",
+    "walk": "walk", "run": "run", "fall": "fall", "lie_down": "lie_down",
 }
+
+
+def normalize_activity(activity) -> str | None:
+    if activity is None:
+        return None
+    normalized = str(activity).strip().lower().replace(" ", "_").replace("-", "_")
+    return ACTIVITY_ALIASES.get(normalized, normalized)
 
 
 def namespace_key(dataset: str | None, value) -> str | None:
@@ -154,399 +95,205 @@ def namespace_key(dataset: str | None, value) -> str | None:
     return f"{dataset}:{value}"
 
 
-def stream_key(dataset: str | None, sample_id, node_id) -> str | None:
-    if dataset is None or sample_id is None or node_id is None:
-        return None
-    return f"{dataset}:{sample_id}:node:{node_id}"
-
-
-def normalize_activity(activity) -> str | None:
-    if activity is None:
-        return None
-
-    normalized = str(activity).strip().lower().replace(" ", "_").replace("-", "_")
-    return ACTIVITY_ALIASES.get(normalized, normalized)
-
-
-def make_silver_row(**values) -> dict:
-    row = dict(SILVER_COLUMNS)
-    row.update(values)
-
-    row["activity"] = normalize_activity(row.get("activity"))
-
-    dataset = row.get("dataset")
-    row["node_key"] = row.get("node_key") or stream_key(
-        dataset, row.get("sample_id"), row.get("node_id")
-    )
-    row["subject_key"] = row.get("subject_key") or namespace_key(
-        dataset, row.get("subject")
-    )
-    row["environment_key"] = row.get("environment_key") or namespace_key(
-        dataset, row.get("environment")
-    )
-    row["location_key"] = row.get("location_key") or namespace_key(
-        dataset, row.get("location")
-    )
-
-    return row
-
-
-def to_float_list(values) -> list[float]:
-    return np.asarray(values, dtype=np.float32).tolist()
-
-
 def select_common_pose_joints(pose, indices: list[int], *, dataset: str) -> np.ndarray:
     pose = np.asarray(pose, dtype=np.float32)
-
     if pose.ndim != 2:
         raise ValueError(f"{dataset} pose must be 2D [joints, dims], got {pose.shape}")
-
     if pose.shape[0] <= max(indices):
-        raise ValueError(
-            f"{dataset} pose has {pose.shape[0]} joints, "
-            f"but common mapping requires index {max(indices)}"
-        )
-
+        raise ValueError(f"{dataset} pose has {pose.shape[0]} joints, need index {max(indices)}")
     return pose[indices]
 
 
-def pose_fields(common_pose: np.ndarray) -> dict:
-    return {
-        "pose": common_pose.astype(np.float32).tolist(),
-        "pose_joints": COMMON_POSE_JOINTS,
-        "pose_dim": int(common_pose.shape[1]),
-        "has_pose": True,
-    }
-
-
-def maybe_json(value) -> str | None:
-    if value is None:
-        return None
-    return json.dumps(value, sort_keys=True)
-
-
-def limit_samples(samples: Iterable[dict], max_samples: int | None) -> Iterable[dict]:
+def limit_samples(samples: Iterable, max_samples: int | None) -> Iterable:
     if max_samples is None:
         yield from samples
         return
-
     for idx, sample in enumerate(samples):
         if idx >= max_samples:
             break
         yield sample
 
 
-def iter_bronze_batches(bronze_root: str | Path) -> Iterable[Path]:
-    root = Path(bronze_root)
-    yield from sorted(root.rglob("*.json"))
+def _safe_sample_id(raw_id: str) -> str:
+    """Sanitize sample_id for use as a filename."""
+    return str(raw_id).replace("/", "_").replace("\\", "_").replace(" ", "_")
 
 
-def decode_packet_record(packet: dict, deployment_id: str, source_file: str) -> dict:
-    pkt = (
-        json.loads(packet["packet_json"])
-        if isinstance(packet.get("packet_json"), str)
-        else packet
-    )
-    amp = pkt.get("amplitude") or []
-    return make_silver_row(
-        dataset="self_captured",
-        deployment_id=deployment_id,
-        source_file=source_file,
-        buffer_id=packet.get("id"),
-        received_at_ms=packet.get("received_at_ms"),
-        node_id=int(pkt.get("node_id", packet.get("node_id", 0))),
-        seq=int(pkt.get("seq", packet.get("seq", 0))),
-        timestamp_us=int(pkt.get("timestamp_us", packet.get("timestamp_us", 0))),
-        rssi=int(pkt.get("rssi", 0)),
-        noise_floor=int(pkt.get("noise_floor", 0)),
-        channel=int(pkt.get("channel", 0)),
-        n_subcarriers=int(pkt.get("n_subcarriers", len(amp))),
-        firmware_version=int(pkt.get("firmware_version", 0)),
-        amplitude=amp,
-        crc32=int(pkt.get("crc32", 0)),
-    )
+# ---------------------------------------------------------------------------
+# Per-dataset converters: yield (catalog_row, csi_tensor) per sample
+# ---------------------------------------------------------------------------
 
-
-def iter_json_packet_rows(bronze_root: str | Path) -> Iterator[dict]:
-    files = list(iter_bronze_batches(bronze_root))
-    log.info("    [self_captured] Found %d JSON batch files in %s", len(files), bronze_root)
-    row_count = 0
-    for fi, file in enumerate(files, 1):
-        obj = json.loads(file.read_text())
-        deployment_id = obj.get("deployment_id", "unknown")
-        packets = obj.get("packets", [])
-        for packet in packets:
-            row_count += 1
-            yield decode_packet_record(packet, deployment_id, str(file))
-        if fi % 10 == 0 or fi == len(files):
-            log.info("    [self_captured] File %d/%d (%.0f%%) | %d rows so far | %s",
-                     fi, len(files), fi / len(files) * 100, row_count, file.name[:30])
-
-
-def iter_wimans_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
-    samples = iter_wimans_samples(
-        root,
-        single_person_only=False,
-        include_empty_room=True,
-    )
-
+def convert_wimans(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
+    samples = iter_wimans_samples(root, single_person_only=False, include_empty_room=True)
     for sample in limit_samples(samples, max_samples):
         amp = load_wimans_amp(sample["amp_path"])
         if amp.ndim != 4:
-            raise ValueError(f"Unexpected WiMANS amp shape: {amp.shape}")
-
-        time_steps, tx_count, rx_count, n_subcarriers = amp.shape
+            log.warning("[wimans] Skipping bad shape %s: %s", sample["amp_path"], amp.shape)
+            continue
+        T, tx, rx, sc = amp.shape
         activity = sample["activities"][0] if sample["activities"] else None
         location = sample["locations"][0] if sample["locations"] else None
-
-        for t in range(time_steps):
-            for tx in range(tx_count):
-                for rx in range(rx_count):
-                    yield make_silver_row(
-                        dataset="wimans",
-                        sample_id=sample["label"],
-                        source_file=str(sample["amp_path"]),
-                        timestamp_us=t,
-                        seq=t,
-                        node_id=tx * rx_count + rx + 1,
-                        tx=tx + 1,
-                        rx=rx + 1,
-                        n_subcarriers=n_subcarriers,
-                        amplitude=to_float_list(amp[t, tx, rx, :]),
-                        activity=activity,
-                        environment=sample["environment"],
-                        location=location,
-                        num_users=sample["num_users"],
-                        has_pose=False,
-                        metadata_json=maybe_json(
-                            {
-                                "wifi_band": sample["wifi_band"],
-                                "activities": sample["activities"],
-                                "locations": sample["locations"],
-                                "mat_path": str(sample["mat_path"])
-                                if sample["mat_path"]
-                                else None,
-                                "video_path": str(sample["video_path"])
-                                if sample["video_path"]
-                                else None,
-                            }
-                        ),
-                    )
+        csi = amp.astype(np.float32)[np.newaxis]  # [1, T, tx, rx, sc]
+        row = dict(
+            dataset="wimans", sample_id=sample["label"],
+            source_file=str(sample["amp_path"]),
+            split=None, activity=normalize_activity(activity),
+            subject=None, environment=sample["environment"], location=location,
+            num_users=sample["num_users"],
+            has_pose=False, pose=None, pose_dim=None,
+            antenna_layout="txrx_pair", has_phase=False,
+            n_tx=tx, n_rx=rx, n_antennas=None,
+            n_subcarriers=sc, n_timesteps=T,
+        )
+        yield row, csi
 
 
-def iter_person_wifi_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
+def convert_person_wifi(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
     for split in ("train", "test"):
         split_dir = root / f"{split}_data"
         if not split_dir.exists():
-            log.info("    [person_in_wifi_3d] Split %s dir not found, skip", split)
             continue
-
-        samples = list(index_person_wifi_samples(
-            root,
-            split=split,
-            single_person_only=False,
-        ))
-        total = min(len(samples), max_samples) if max_samples else len(samples)
-        log.info("    [person_in_wifi_3d] Split=%s found %d samples (processing %d)", split, len(samples), total)
-        t0_pw = time.time()
-        row_count = 0
-
-        for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
-            csi = load_person_wifi_csi_mat(sample["csi_path"])
-            keypoint = load_person_wifi_keypoint_npy(
-                sample["keypoint_path"],
-                single_person_only=False,
+        samples = list(index_person_wifi_samples(root, split=split, single_person_only=False))
+        for sample in limit_samples(iter(samples), max_samples):
+            csi_raw = load_person_wifi_csi_mat(sample["csi_path"])
+            keypoint = load_person_wifi_keypoint_npy(sample["keypoint_path"], single_person_only=False)
+            try:
+                common_pose = select_common_pose_joints(keypoint[0], PERSON_WIFI_TO_COMMON, dataset="person_in_wifi_3d")
+            except (ValueError, IndexError) as e:
+                log.warning("[person_wifi] Skipping %s: %s", sample["name"], e)
+                continue
+            amp = np.abs(csi_raw).astype(np.float32)
+            phase = np.angle(csi_raw).astype(np.float32)
+            ant1, ant2, sc, T = amp.shape
+            csi = np.stack([
+                amp.transpose(3, 0, 1, 2),   # [T, ant1, ant2, sc]
+                phase.transpose(3, 0, 1, 2),
+            ])  # [2, T, ant1, ant2, sc]
+            row = dict(
+                dataset="person_in_wifi_3d", sample_id=sample["name"],
+                source_file=str(sample["csi_path"]),
+                split=split, activity=None,
+                subject=None, environment=None, location=None,
+                num_users=sample["num_people"],
+                has_pose=True, pose=common_pose.tolist(), pose_dim=int(common_pose.shape[1]),
+                antenna_layout="txrx_pair", has_phase=True,
+                n_tx=ant1, n_rx=ant2, n_antennas=None,
+                n_subcarriers=sc, n_timesteps=T,
             )
-            common_pose = select_common_pose_joints(
-                keypoint[0],
-                PERSON_WIFI_TO_COMMON,
-                dataset="person_in_wifi_3d",
-            )
-            amp = np.abs(csi).astype(np.float32)
-            phase = np.angle(csi).astype(np.float32)
-            ant1_count, ant2_count, n_subcarriers, time_steps = csi.shape
-
-            for t in range(time_steps):
-                for ant1 in range(ant1_count):
-                    for ant2 in range(ant2_count):
-                        row_count += 1
-                        yield make_silver_row(
-                            dataset="person_in_wifi_3d",
-                            sample_id=sample["name"],
-                            split=split,
-                            source_file=str(sample["csi_path"]),
-                            timestamp_us=t,
-                            seq=t,
-                            node_id=ant1 * ant2_count + ant2 + 1,
-                            tx=ant1 + 1,
-                            rx=ant2 + 1,
-                            n_subcarriers=n_subcarriers,
-                            amplitude=to_float_list(amp[ant1, ant2, :, t]),
-                            phase=to_float_list(phase[ant1, ant2, :, t]),
-                            num_users=sample["num_people"],
-                            pose_path=str(sample["keypoint_path"]),
-                            **pose_fields(common_pose),
-                        )
-            if si % 5 == 0 or si == total:
-                log.info("    [person_in_wifi_3d/%s] Sample %d/%d (%.0f%%) | %d rows | %.1fs",
-                         split, si, total, si/total*100, row_count, time.time()-t0_pw)
+            yield row, csi
 
 
-def iter_wipose_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
+def convert_wipose(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
     samples = list(index_wipose_samples(root))
-    total = min(len(samples), max_samples) if max_samples else len(samples)
-    log.info("    [wipose] Found %d samples (processing %d)", len(samples), total)
-    row_count = 0
-    t0_wp = time.time()
-
-    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
-        csi, pose = load_wipose_mat(sample["path"])
-        common_pose = select_common_pose_joints(
-            pose,
-            WIPOSE_TO_COMMON,
-            dataset="wipose",
+    for sample in limit_samples(iter(samples), max_samples):
+        csi_raw, pose = load_wipose_mat(sample["path"])
+        try:
+            common_pose = select_common_pose_joints(pose, WIPOSE_TO_COMMON, dataset="wipose")
+        except (ValueError, IndexError) as e:
+            log.warning("[wipose] Skipping %s: %s", sample["path"].stem, e)
+            continue
+        tx, rx, sc, T, _ch = csi_raw.shape
+        amp = np.abs(csi_raw[:, :, :, :, 0]).astype(np.float32)
+        csi = amp.transpose(3, 0, 1, 2)[np.newaxis]  # [1, T, tx, rx, sc]
+        row = dict(
+            dataset="wipose", sample_id=sample["path"].stem,
+            source_file=str(sample["path"]),
+            split=sample.get("split"), activity=normalize_activity(sample.get("action")),
+            subject=sample.get("subject"), environment=None, location=None,
+            num_users=None,
+            has_pose=True, pose=common_pose.tolist(), pose_dim=int(common_pose.shape[1]),
+            antenna_layout="txrx_pair", has_phase=False,
+            n_tx=tx, n_rx=rx, n_antennas=None,
+            n_subcarriers=sc, n_timesteps=T,
         )
-        tx_count, rx_count, n_subcarriers, time_steps, _channels = csi.shape
-
-        for t in range(time_steps):
-            for tx in range(tx_count):
-                for rx in range(rx_count):
-                    yield make_silver_row(
-                        dataset="wipose",
-                        sample_id=sample["path"].stem,
-                        split=sample["split"],
-                        source_file=str(sample["path"]),
-                        frame_id=sample["frame"],
-                        timestamp_us=t,
-                        seq=t,
-                        node_id=tx * rx_count + rx + 1,
-                        tx=tx + 1,
-                        rx=rx + 1,
-                        n_subcarriers=n_subcarriers,
-                        amplitude=to_float_list(csi[tx, rx, :, t, 0]),
-                        activity=sample["action"],
-                        subject=sample["subject"],
-                        **pose_fields(common_pose),
-                    )
+        yield row, csi
 
 
-def iter_mmfi_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
+def convert_mmfi(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
     samples = list(index_mmfi_wifi_csi_samples(root, require_pose=False))
-    total = min(len(samples), max_samples) if max_samples else len(samples)
-    log.info("    [mmfi] Found %d samples (processing %d)", len(samples), total)
-    row_count = 0
-    t0_mm = time.time()
-
-    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
-        amp, phase = load_mmfi_csi_mat(sample["path"])
-        antenna_count, n_subcarriers, time_steps = amp.shape
-        pose_index = (
-            mmfi_frame_to_index(sample["frame"])
-            if sample["pose_path"] is not None
-            else None
-        )
+    for sample in limit_samples(iter(samples), max_samples):
+        amp_raw, phase_raw = load_mmfi_csi_mat(sample["path"])
+        antenna_count, sc, T = amp_raw.shape
         common_pose = None
         if sample["pose_path"] is not None:
-            poses = load_mmfi_pose_npy(sample["pose_path"])
-            common_pose = select_common_pose_joints(
-                poses[pose_index],
-                MMFI_TO_COMMON,
-                dataset="mmfi",
-            )
-
-        for t in range(time_steps):
-            for antenna in range(antenna_count):
-                pose_values = (
-                    pose_fields(common_pose)
-                    if common_pose is not None
-                    else {"has_pose": False}
-                )
-                yield make_silver_row(
-                    dataset="mmfi",
-                    sample_id=str(sample["path"].parent.parent),
-                    source_file=str(sample["path"]),
-                    frame_id=sample["frame"],
-                    timestamp_us=t,
-                    seq=t,
-                    node_id=antenna + 1,
-                    rx=antenna + 1,
-                    antenna=antenna + 1,
-                    n_subcarriers=n_subcarriers,
-                    amplitude=to_float_list(amp[antenna, :, t]),
-                    phase=to_float_list(phase[antenna, :, t]),
-                    activity=sample["action"],
-                    subject=sample["subject"],
-                    environment=sample["environment"],
-                    pose_path=str(sample["pose_path"]) if sample["pose_path"] else None,
-                    pose_index=pose_index,
-                    **pose_values,
-                )
+            try:
+                pose_index = mmfi_frame_to_index(sample["frame"])
+                poses = load_mmfi_pose_npy(sample["pose_path"])
+                common_pose = select_common_pose_joints(poses[pose_index], MMFI_TO_COMMON, dataset="mmfi")
+            except (ValueError, IndexError) as e:
+                log.warning("[mmfi] Pose error %s: %s", sample["path"], e)
+        amp = amp_raw.astype(np.float32).transpose(2, 0, 1)      # [T, antenna, sc]
+        phase = phase_raw.astype(np.float32).transpose(2, 0, 1)
+        csi = np.stack([amp, phase])  # [2, T, antenna, sc]
+        row = dict(
+            dataset="mmfi", sample_id=_safe_sample_id(str(sample["path"].parent.parent)),
+            source_file=str(sample["path"]),
+            split=None, activity=normalize_activity(sample.get("action")),
+            subject=sample.get("subject"), environment=sample.get("environment"), location=None,
+            num_users=None,
+            has_pose=common_pose is not None,
+            pose=common_pose.tolist() if common_pose is not None else None,
+            pose_dim=int(common_pose.shape[1]) if common_pose is not None else None,
+            antenna_layout="antenna", has_phase=True,
+            n_tx=None, n_rx=None, n_antennas=antenna_count,
+            n_subcarriers=sc, n_timesteps=T,
+        )
+        yield row, csi
 
 
-def iter_uthar_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
+def convert_uthar(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
     for split in ("train", "val", "test"):
-        x, y = load_uthar_arrays(root, split)
-        sample_count = len(y) if max_samples is None else min(len(y), max_samples)
-        log.info("    [uthar/%s] %d total samples, processing %d", split, len(y), sample_count)
-
-        for sample_idx in range(sample_count):
-            sample = x[sample_idx].reshape(250, 3, 30)
-            label = int(y[sample_idx])
-
-            for t in range(sample.shape[0]):
-                for antenna in range(sample.shape[1]):
-                    yield make_silver_row(
-                        dataset="uthar",
-                        sample_id=f"{split}_{sample_idx}",
-                        split=split,
-                        source_file=str(root / "data" / f"X_{split}.csv"),
-                        timestamp_us=t,
-                        seq=t,
-                        node_id=antenna + 1,
-                        antenna=antenna + 1,
-                        n_subcarriers=30,
-                        amplitude=to_float_list(sample[t, antenna, :]),
-                        activity=UT_HAR_ACTIONS.get(label, f"unknown_{label}"),
-                        activity_id=label,
-                        has_pose=False,
-                    )
+        x_all, y_all = load_uthar_arrays(root, split)
+        sample_count = len(y_all) if max_samples is None else min(len(y_all), max_samples)
+        for idx in range(sample_count):
+            sample = x_all[idx].reshape(250, 3, 30).astype(np.float32)
+            label = int(y_all[idx])
+            csi = sample[np.newaxis]  # [1, T=250, antenna=3, sc=30]
+            row = dict(
+                dataset="uthar", sample_id=f"{split}_{idx}",
+                source_file=str(root / "data" / f"X_{split}.csv"),
+                split=split, activity=normalize_activity(UT_HAR_ACTIONS.get(label, f"unknown_{label}")),
+                activity_id=label,
+                subject=None, environment=None, location=None,
+                num_users=None,
+                has_pose=False, pose=None, pose_dim=None,
+                antenna_layout="antenna", has_phase=False,
+                n_tx=None, n_rx=None, n_antennas=3,
+                n_subcarriers=30, n_timesteps=250,
+            )
+            yield row, csi
 
 
-def iter_wiar_rows(root: Path, max_samples: int | None = None) -> Iterator[dict]:
+def convert_wiar(root: Path, max_samples: int | None = None) -> Iterator[tuple[dict, np.ndarray]]:
     samples = list(index_wiar_samples(root))
-    total = min(len(samples), max_samples) if max_samples else len(samples)
-    log.info("    [wiar] Found %d samples (processing %d)", len(samples), total)
-    row_count = 0
-    t0_wi = time.time()
-
-    for si, sample in enumerate(limit_samples(iter(samples), max_samples), 1):
+    for sample in limit_samples(iter(samples), max_samples):
         loaded = load_wiar_sample(sample["path"])
-        csi = loaded["csi"]
-        time_steps, n_subcarriers, rx_count, tx_count = csi.shape
-        amp = np.abs(csi).astype(np.float32)
-        phase = np.angle(csi).astype(np.float32)
+        csi_raw = loaded["csi"]
+        T, sc, rx, tx = csi_raw.shape
+        amp = np.abs(csi_raw).astype(np.float32)
+        phase = np.angle(csi_raw).astype(np.float32)
+        amp_t = amp.transpose(0, 2, 3, 1)    # [T, rx, tx, sc]
+        phase_t = phase.transpose(0, 2, 3, 1)
+        csi = np.stack([amp_t, phase_t])  # [2, T, rx, tx, sc]
+        row = dict(
+            dataset="wiar",
+            sample_id=f"{sample['volunteer']}_{sample['activity_id']}_{sample['sample_id']}",
+            source_file=str(sample["path"]),
+            split=None, activity=normalize_activity(sample.get("activity_name")),
+            activity_id=sample.get("activity_id"),
+            subject=sample.get("volunteer"), environment=None, location=None,
+            num_users=None,
+            has_pose=False, pose=None, pose_dim=None,
+            antenna_layout="txrx_pair", has_phase=True,
+            n_tx=tx, n_rx=rx, n_antennas=None,
+            n_subcarriers=sc, n_timesteps=T,
+        )
+        yield row, csi
 
-        for t in range(time_steps):
-            for rx in range(rx_count):
-                for tx in range(tx_count):
-                    yield make_silver_row(
-                        dataset="wiar",
-                        sample_id=f"{sample['volunteer']}_{sample['activity_id']}_{sample['sample_id']}",
-                        source_file=str(sample["path"]),
-                        timestamp_us=t,
-                        seq=t,
-                        node_id=tx * rx_count + rx + 1,
-                        tx=tx + 1,
-                        rx=rx + 1,
-                        n_subcarriers=n_subcarriers,
-                        amplitude=to_float_list(amp[t, :, rx, tx]),
-                        phase=to_float_list(phase[t, :, rx, tx]),
-                        activity=sample["activity_name"],
-                        activity_id=sample["activity_id"],
-                        subject=sample["volunteer"],
-                        has_pose=False,
-                    )
 
+# ---------------------------------------------------------------------------
+# Dataset roots & converter registry
+# ---------------------------------------------------------------------------
 
 def existing_dataset_roots(bronze_root: str | Path) -> dict[str, Path]:
     root = Path(bronze_root)
@@ -559,161 +306,19 @@ def existing_dataset_roots(bronze_root: str | Path) -> dict[str, Path]:
         "wiar": root / "WiAR-master" / "WiAR-master" / "data" / "data",
     }
 
+CONVERTERS = {
+    "wimans": convert_wimans,
+    "person_in_wifi_3d": convert_person_wifi,
+    "wipose": convert_wipose,
+    "mmfi": convert_mmfi,
+    "uthar": convert_uthar,
+    "wiar": convert_wiar,
+}
 
 
-
-def _process_single_dataset(args):
-    """Worker function for parallel dataset processing."""
-    dataset_name, dataset_root, converter_name, max_samples = args
-    converters = {
-        "wimans": iter_wimans_rows,
-        "person_in_wifi_3d": iter_person_wifi_rows,
-        "wipose": iter_wipose_rows,
-        "mmfi": iter_mmfi_rows,
-        "uthar": iter_uthar_rows,
-        "wiar": iter_wiar_rows,
-    }
-    converter = converters[converter_name]
-    t0 = time.time()
-    log.info("    [%s] WORKER START root=%s max_samples=%s", dataset_name, dataset_root, max_samples)
-    rows = list(converter(Path(dataset_root), max_samples=max_samples))
-    elapsed = time.time() - t0
-    log.info("    [%s] WORKER DONE: %d rows in %.1fs (%.0f rows/s)",
-             dataset_name, len(rows), elapsed, len(rows) / max(elapsed, 0.01))
-    return dataset_name, rows
-
-
-def iter_public_dataset_rows(
-    bronze_root: str | Path,
-    *,
-    datasets: set[str] | None = None,
-    max_samples_per_dataset: int | None = None,
-) -> Iterator[dict]:
-    converters = {
-        "wimans": iter_wimans_rows,
-        "person_in_wifi_3d": iter_person_wifi_rows,
-        "wipose": iter_wipose_rows,
-        "mmfi": iter_mmfi_rows,
-        "uthar": iter_uthar_rows,
-        "wiar": iter_wiar_rows,
-    }
-
-    all_datasets = list(existing_dataset_roots(bronze_root).items())
-    total_datasets = len(all_datasets)
-    active_idx = 0
-    for dataset_name, dataset_root in all_datasets:
-        if datasets is not None and dataset_name not in datasets:
-            log.info("Skipping dataset=%s because it is not selected", dataset_name)
-            continue
-
-        if not dataset_root.exists():
-            log.info("Skipping dataset=%s because root is missing: %s", dataset_name, dataset_root)
-            continue
-
-        log.info(
-            "Starting bronze-to-silver dataset=%s root=%s max_samples_per_dataset=%s",
-            dataset_name,
-            dataset_root,
-            max_samples_per_dataset if max_samples_per_dataset is not None else "all",
-        )
-        row_count = 0
-        for row in converters[dataset_name](
-            dataset_root,
-            max_samples=max_samples_per_dataset,
-        ):
-            row_count += 1
-            yield row
-        log.info("Finished bronze-to-silver dataset=%s rows=%d", dataset_name, row_count)
-
-
-def iter_silver_rows(
-    bronze_root: str | Path,
-    *,
-    datasets: set[str] | None = None,
-    max_samples_per_dataset: int | None = None,
-) -> Iterator[dict]:
-    if datasets is None or "self_captured" in datasets:
-        log.info("Starting bronze-to-silver dataset=self_captured root=%s", bronze_root)
-        row_count = 0
-        for row in iter_json_packet_rows(bronze_root):
-            row_count += 1
-            yield row
-        log.info("Finished bronze-to-silver dataset=self_captured rows=%d", row_count)
-    else:
-        log.info("Skipping dataset=self_captured because it is not selected")
-
-    yield from iter_public_dataset_rows(
-        bronze_root,
-        datasets=datasets,
-        max_samples_per_dataset=max_samples_per_dataset,
-    )
-
-
-def write_rows(rows: list[dict], silver_out: str | Path) -> None:
-    if is_s3_uri(silver_out):
-        with tempfile.TemporaryDirectory(prefix="rfpose-silver-") as tmpdir:
-            local_out = Path(tmpdir) / Path(str(silver_out)).name
-            log.info(
-                "Writing silver rows to temporary file before S3 upload path=%s rows=%d",
-                local_out,
-                len(rows),
-            )
-            write_rows(rows, local_out)
-            upload_report = upload_s3_file(local_out, silver_out)
-            log.info(
-                "Uploaded silver rows to %s bytes=%d",
-                upload_report["uri"],
-                upload_report["bytes"],
-            )
-        return
-
-    out = Path(silver_out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    if pl is not None and out.suffix == ".parquet":
-        pl.DataFrame(rows).write_parquet(out)
-        log.info("Wrote silver parquet path=%s rows=%d bytes=%d", out, len(rows), out.stat().st_size)
-        return
-
-    log.info("  [write_rows] Writing %d rows to %s ...", len(rows), out)
-    t0_wr = time.time()
-    out.write_text("\n".join(json.dumps(row) for row in rows))
-    elapsed_wr = time.time() - t0_wr
-    size_mb = out.stat().st_size / 1024 / 1024
-    log.info("  [write_rows] Done: %d rows, %.1f MB, %.1fs (%.1f MB/s)", len(rows), size_mb, elapsed_wr, size_mb / max(elapsed_wr, 0.01))
-
-
-def build_quality_report(rows: list[dict]) -> dict:
-    log.info("  [quality_report] Building from %d rows ...", len(rows))
-    t0_qr = time.time()
-    node_ids = sorted({row["node_id"] for row in rows if row.get("node_id") is not None})
-    datasets = Counter(row["dataset"] for row in rows)
-    log.info("  [quality_report] %d unique nodes, datasets: %s", len(node_ids), dict(datasets))
-    seq_drops = 0
-    seqs_by_stream = defaultdict(list)
-
-    for row in rows:
-        if row.get("seq") is None or row.get("node_id") is None:
-            continue
-        key = (row.get("dataset"), row.get("sample_id"), row.get("node_id"))
-        seqs_by_stream[key].append(int(row["seq"]))
-
-    for seqs in seqs_by_stream.values():
-        seqs = sorted(set(seqs))
-        for a, b in zip(seqs, seqs[1:]):
-            if b > a + 1:
-                seq_drops += b - a - 1
-
-    return {
-        "rows": len(rows),
-        "datasets": dict(sorted(datasets.items())),
-        "node_ids": node_ids,
-        "node_count": len(node_ids),
-        "seq_drops_est": seq_drops,
-        "status": "ok" if rows else "empty",
-        "schema_version": "silver_csi_v1",
-    }
-
+# ---------------------------------------------------------------------------
+# S3 helpers (kept from original)
+# ---------------------------------------------------------------------------
 
 def parse_dataset_filter(value: str | None) -> set[str] | None:
     if value is None or not value.strip():
@@ -724,14 +329,12 @@ def parse_dataset_filter(value: str | None) -> set[str] | None:
 def parse_suffix_filter(value: str | None) -> set[str] | None:
     if value is None or not value.strip():
         return None
-
     suffixes = set()
     for part in value.split(","):
         suffix = part.strip().lower()
         if not suffix:
             continue
         suffixes.add(suffix if suffix.startswith(".") else f".{suffix}")
-
     return suffixes or None
 
 
@@ -743,8 +346,7 @@ def parse_s3_uri(uri: str | Path) -> tuple[str, str]:
     value = str(uri)
     if not value.startswith("s3://"):
         raise ValueError(f"Expected s3:// URI, got {value}")
-
-    without_scheme = value[len("s3://") :]
+    without_scheme = value[len("s3://"):]
     bucket, _, prefix = without_scheme.partition("/")
     if not bucket:
         raise ValueError(f"S3 URI must include a bucket: {value}")
@@ -754,62 +356,49 @@ def parse_s3_uri(uri: str | Path) -> tuple[str, str]:
 def make_s3_client():
     try:
         import boto3
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "boto3 is required to read bronze data from s3:// URIs."
-        ) from exc
-
-    endpoint_url = (
-        os.getenv("S3_ENDPOINT_URL")
-        or os.getenv("AWS_ENDPOINT_URL")
-        or "http://207.180.243.242:9000"
-    )
+    except ImportError as exc:
+        raise RuntimeError("boto3 is required for S3 URIs.") from exc
+    endpoint_url = os.getenv("S3_ENDPOINT_URL") or os.getenv("AWS_ENDPOINT_URL") or "http://207.180.243.242:9000"
     access_key = os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("MINIO_ROOT_USER")
     secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or os.getenv("MINIO_ROOT_PASSWORD")
-
     kwargs = {"endpoint_url": endpoint_url}
     if access_key and secret_key:
         kwargs["aws_access_key_id"] = access_key
         kwargs["aws_secret_access_key"] = secret_key
-
     return boto3.client("s3", **kwargs)
 
 
-def download_s3_prefix(
-    s3_uri: str | Path,
-    destination: Path,
-    *,
-    suffixes: set[str] | None = None,
-) -> dict:
+def upload_s3_file(local_path: Path, s3_uri: str | Path) -> dict:
+    bucket, key = parse_s3_uri(s3_uri)
+    client = make_s3_client()
+    client.upload_file(str(local_path), bucket, key)
+    return {"bucket": bucket, "key": key, "bytes": local_path.stat().st_size, "uri": f"s3://{bucket}/{key}"}
+
+
+def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
     bucket, prefix = parse_s3_uri(s3_uri)
-    log.info(
-        "Starting S3 bronze staging uri=%s bucket=%s prefix=%s suffixes=%s destination=%s",
-        s3_uri,
-        bucket,
-        prefix,
-        sorted(suffixes) if suffixes is not None else "all",
-        destination,
-    )
+    prefix = prefix.strip("/")
+    client = make_s3_client()
+    object_count, total_bytes = 0, 0
+    for path in sorted(local_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_key = path.relative_to(local_dir).as_posix()
+        key = f"{prefix}/{relative_key}" if prefix else relative_key
+        client.upload_file(str(path), bucket, key)
+        object_count += 1
+        total_bytes += path.stat().st_size
+    return {"bucket": bucket, "prefix": prefix, "object_count": object_count, "total_bytes": total_bytes, "uri": f"s3://{bucket}/{prefix}"}
+
+
+def download_s3_prefix(s3_uri: str | Path, destination: Path, *, suffixes: set[str] | None = None) -> dict:
+    bucket, prefix = parse_s3_uri(s3_uri)
     client = make_s3_client()
     paginator = client.get_paginator("list_objects_v2")
     page_kwargs = {"Bucket": bucket}
     if prefix:
         page_kwargs["Prefix"] = f"{prefix}/"
-
-    object_count = 0
-    skipped_count = 0
-    total_bytes = 0
-    latest_key = None
-
-    # Pre-scan: count total objects for progress
-    total_objects = 0
-    for count_page in paginator.paginate(**page_kwargs):
-        for obj in count_page.get("Contents", []):
-            if not obj["Key"].endswith("/"):
-                total_objects += 1
-    log.info("  [S3 scan] Found %d total objects in s3://%s/%s", total_objects, bucket, prefix or "")
-
-    dl_start = time.time()
+    object_count, skipped_count, total_bytes = 0, 0, 0
     for page in paginator.paginate(**page_kwargs):
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -818,116 +407,17 @@ def download_s3_prefix(
             if suffixes is not None and Path(key).suffix.lower() not in suffixes:
                 skipped_count += 1
                 continue
-
-            relative_key = key[len(prefix) :].lstrip("/") if prefix else key
+            relative_key = key[len(prefix):].lstrip("/") if prefix else key
             if not relative_key:
                 continue
-
             local_path = destination / relative_key
             local_path.parent.mkdir(parents=True, exist_ok=True)
             client.download_file(bucket, key, str(local_path))
-
             object_count += 1
             total_bytes += int(obj.get("Size", 0))
-            latest_key = key
-            if object_count % 50 == 0 or object_count == total_objects:
-                elapsed = time.time() - dl_start
-                speed_mb = (total_bytes / 1024 / 1024) / max(elapsed, 0.01)
-                pct = object_count / max(total_objects, 1) * 100
-                eta = (elapsed / object_count) * (total_objects - object_count) if object_count > 0 else 0
-                log.info(
-                    "  [S3 download] %d/%d (%.0f%%) | %.1f MB | %.2f MB/s | ETA %.0fs | %s",
-                    object_count, total_objects, pct, total_bytes / 1024 / 1024,
-                    speed_mb, eta, key.split("/")[-1][:40],
-                )
-
     if object_count == 0:
         raise RuntimeError(f"No objects found under {s3_uri}")
-
-    log.info(
-        "Finished S3 bronze staging uri=%s downloaded=%d skipped=%d bytes=%d latest_key=%s",
-        s3_uri,
-        object_count,
-        skipped_count,
-        total_bytes,
-        latest_key,
-    )
-    return {
-        "bucket": bucket,
-        "prefix": prefix,
-        "object_count": object_count,
-        "skipped_count": skipped_count,
-        "total_bytes": total_bytes,
-        "latest_key": latest_key,
-    }
-
-
-def download_s3_file(s3_uri: str | Path, destination: Path) -> dict:
-    bucket, key = parse_s3_uri(s3_uri)
-    if not key:
-        raise ValueError(f"S3 input URI must include an object key: {s3_uri}")
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    log.info("Downloading S3 file uri=%s destination=%s", s3_uri, destination)
-    client = make_s3_client()
-    client.download_file(bucket, key, str(destination))
-    log.info("Downloaded S3 file uri=%s bytes=%d", s3_uri, destination.stat().st_size)
-    return {
-        "bucket": bucket,
-        "key": key,
-        "bytes": destination.stat().st_size,
-        "uri": f"s3://{bucket}/{key}",
-    }
-
-
-def upload_s3_file(local_path: Path, s3_uri: str | Path) -> dict:
-    bucket, key = parse_s3_uri(s3_uri)
-    if not key:
-        raise ValueError(f"S3 output URI must include an object key: {s3_uri}")
-
-    client = make_s3_client()
-    log.info("Uploading file to S3 local_path=%s uri=%s bytes=%d", local_path, s3_uri, local_path.stat().st_size)
-    client.upload_file(str(local_path), bucket, key)
-    log.info("Uploaded file to S3 uri=s3://%s/%s bytes=%d", bucket, key, local_path.stat().st_size)
-    return {
-        "bucket": bucket,
-        "key": key,
-        "bytes": local_path.stat().st_size,
-        "uri": f"s3://{bucket}/{key}",
-    }
-
-
-def upload_s3_directory(local_dir: Path, s3_uri: str | Path) -> dict:
-    bucket, prefix = parse_s3_uri(s3_uri)
-    prefix = prefix.strip("/")
-    client = make_s3_client()
-    log.info("Uploading directory to S3 local_dir=%s uri=%s", local_dir, s3_uri)
-
-    object_count = 0
-    total_bytes = 0
-    for path in sorted(local_dir.rglob("*")):
-        if not path.is_file():
-            continue
-
-        relative_key = path.relative_to(local_dir).as_posix()
-        key = f"{prefix}/{relative_key}" if prefix else relative_key
-        client.upload_file(str(path), bucket, key)
-        object_count += 1
-        total_bytes += path.stat().st_size
-
-    log.info(
-        "Uploaded directory to S3 uri=%s object_count=%d bytes=%d",
-        s3_uri,
-        object_count,
-        total_bytes,
-    )
-    return {
-        "bucket": bucket,
-        "prefix": prefix,
-        "object_count": object_count,
-        "total_bytes": total_bytes,
-        "uri": f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}",
-    }
+    return {"bucket": bucket, "prefix": prefix, "object_count": object_count, "skipped_count": skipped_count, "total_bytes": total_bytes}
 
 
 @contextmanager
@@ -936,26 +426,16 @@ def materialized_bronze_root(bronze_root: str | Path) -> Iterator[tuple[Path, di
         log.info("Using local bronze root=%s", bronze_root)
         yield Path(bronze_root), {"source_type": "local", "source_uri": str(bronze_root)}
         return
-
     with tempfile.TemporaryDirectory(prefix="rfpose-bronze-") as tmpdir:
         local_root = Path(tmpdir)
-        suffixes = parse_suffix_filter(
-            os.getenv("RFPOSE_S3_STAGE_EXTENSIONS", ".json,.mat,.npy,.csv,.dat")
-        )
-        log.info("Materializing S3 bronze root=%s stage_extensions=%s", bronze_root, sorted(suffixes) if suffixes is not None else "all")
-        s3_report = download_s3_prefix(
-            bronze_root,
-            local_root,
-            suffixes=suffixes,
-        )
-        yield local_root, {
-            "source_type": "s3",
-            "source_uri": str(bronze_root),
-            "staged_root": str(local_root),
-            "stage_extensions": sorted(suffixes) if suffixes is not None else "all",
-            **s3_report,
-        }
+        suffixes = parse_suffix_filter(os.getenv("RFPOSE_S3_STAGE_EXTENSIONS", ".json,.mat,.npy,.csv,.dat"))
+        s3_report = download_s3_prefix(bronze_root, local_root, suffixes=suffixes)
+        yield local_root, {"source_type": "s3", "source_uri": str(bronze_root), **s3_report}
 
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def bronze_to_silver(
     bronze_root: str | Path,
@@ -967,220 +447,145 @@ def bronze_to_silver(
 ) -> dict:
     if datasets is None:
         datasets = parse_dataset_filter(os.getenv("RFPOSE_BRONZE_DATASETS"))
-
     if max_samples_per_dataset is None and os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"):
         max_samples_per_dataset = int(os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"))
 
-    # --- Idempotent check ---
-    if not force and not is_s3_uri(silver_out):
-        out_path = Path(silver_out)
-        report_path = out_path.parent / "quality_report.json"
-        if out_path.exists() and report_path.exists():
+    out_dir = Path(silver_out)
+
+    # Idempotent check
+    if not force:
+        report_path = out_dir / "quality_report.json"
+        if report_path.exists():
             try:
                 cached = json.loads(report_path.read_text())
                 cached["skipped"] = True
-                log.info("SKIP bronze_to_silver: output exists at %s (%d rows)", silver_out, cached.get("rows", 0))
+                log.info("SKIP bronze_to_silver: output exists at %s (%d samples)", silver_out, cached.get("samples", 0))
                 return cached
             except Exception:
                 pass
-    elif not force and is_s3_uri(silver_out):
-        try:
-            bucket, key = parse_s3_uri(silver_out)
-            client = make_s3_client()
-            client.head_object(Bucket=bucket, Key=key)
-            parent_prefix = key.rsplit("/", 1)[0] if "/" in key else ""
-            report_key = f"{parent_prefix}/quality_report.json" if parent_prefix else "quality_report.json"
-            resp = client.get_object(Bucket=bucket, Key=report_key)
-            cached = json.loads(resp["Body"].read().decode())
-            cached["skipped"] = True
-            log.info("SKIP bronze_to_silver: S3 output exists at %s (%d rows)", silver_out, cached.get("rows", 0))
-            return cached
-        except Exception:
-            pass
 
-    log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s)", bronze_root, silver_out, datasets)
+    log.info("START bronze_to_silver: bronze=%s -> silver=%s (datasets=%s, max_samples=%s)",
+             bronze_root, silver_out, datasets, max_samples_per_dataset)
 
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
         log.info("  Bronze source: %s", source_report.get("source_type", "local"))
 
-        # --- Stream rows to a temp JSONL file to avoid OOM ---
-        # We never hold all rows in memory; write each row to disk immediately
-        # and track quality metrics incrementally.
-        tmp_jsonl = Path(tempfile.mktemp(prefix="rfpose-silver-stream-", suffix=".jsonl"))
-        tmp_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        csi_dir = out_dir / "csi"
+        csi_dir.mkdir(exist_ok=True)
 
-        total_rows = 0
+        catalog_rows = []
         dataset_counts = Counter()
-        node_id_set = set()
-        seqs_by_stream = defaultdict(list)
+        quality_issues = []
+        t0_total = time.time()
 
-        converters = {
-            "wimans": iter_wimans_rows,
-            "person_in_wifi_3d": iter_person_wifi_rows,
-            "wipose": iter_wipose_rows,
-            "mmfi": iter_mmfi_rows,
-            "uthar": iter_uthar_rows,
-            "wiar": iter_wiar_rows,
-        }
+        all_ds_roots = list(existing_dataset_roots(local_bronze_root).items())
+        active_datasets = []
+        for ds_name, ds_root in all_ds_roots:
+            if datasets is not None and ds_name not in datasets:
+                log.info("  [%s] Skipped (not in filter)", ds_name)
+                continue
+            if not ds_root.exists():
+                log.info("  [%s] Skipped (not found: %s)", ds_name, ds_root)
+                continue
+            active_datasets.append((ds_name, ds_root))
 
-        def _all_row_sources():
-            if datasets is None or "self_captured" in datasets:
-                log.info("  [self_captured] Processing ...")
-                yield "self_captured", iter_json_packet_rows(local_bronze_root)
-            all_ds = list(existing_dataset_roots(local_bronze_root).items())
-            for ds_name, ds_root in all_ds:
-                if datasets is not None and ds_name not in datasets:
-                    log.info("  [%s] Skipped (not in filter)", ds_name)
+        total_ds = len(active_datasets)
+        log.info("  Processing %d datasets ...", total_ds)
+
+        for ds_idx, (ds_name, ds_root) in enumerate(active_datasets, 1):
+            t0_ds = time.time()
+            converter = CONVERTERS[ds_name]
+            ds_csi_dir = csi_dir / ds_name
+            ds_csi_dir.mkdir(exist_ok=True)
+
+            ds_count = 0
+            ds_skipped = 0
+            log.info("  [%d/%d] [%s] START root=%s", ds_idx, total_ds, ds_name, ds_root)
+
+            for row, csi_tensor in converter(ds_root, max_samples=max_samples_per_dataset):
+                # Validate CSI
+                if csi_tensor.size == 0 or np.isnan(csi_tensor).all():
+                    ds_skipped += 1
+                    quality_issues.append(f"{ds_name}/{row['sample_id']}: empty or all-NaN CSI")
                     continue
-                if not ds_root.exists():
-                    log.info("  [%s] Skipped (not found: %s)", ds_name, ds_root)
-                    continue
-                yield ds_name, converters[ds_name](ds_root, max_samples=max_samples_per_dataset)
 
-        sources = list(_all_row_sources())
-        total_ds = len(sources)
+                # Save CSI as .npy
+                sid = _safe_sample_id(row["sample_id"])
+                csi_path = ds_csi_dir / f"{sid}.npy"
+                np.save(csi_path, csi_tensor)
 
-        with open(tmp_jsonl, "w") as fout:
-            for ds_idx, (ds_name, row_iter) in enumerate(sources, 1):
-                t0_ds = time.time()
-                log.info("  [%d/%d] [%s] START ...", ds_idx, total_ds, ds_name)
-                ds_row_count = 0
-                for row in row_iter:
-                    line = json.dumps(row)
-                    fout.write(line)
-                    fout.write("\n")
-                    total_rows += 1
-                    ds_row_count += 1
-                    dataset_counts[row.get("dataset", ds_name)] += 1
-                    nid = row.get("node_id")
-                    if nid is not None:
-                        node_id_set.add(nid)
-                    if row.get("seq") is not None and nid is not None:
-                        key = (row.get("dataset"), row.get("sample_id"), nid)
-                        seqs_by_stream[key].append(int(row["seq"]))
-                    if ds_row_count % 100000 == 0:
-                        log.info("    [%s] %d rows streamed (%.1fs) ...",
-                                 ds_name, ds_row_count, time.time() - t0_ds)
-                elapsed_ds = time.time() - t0_ds
-                log.info("  [%d/%d %.0f%%] [%s] DONE: %d rows in %.1fs (%.0f rows/s)",
-                         ds_idx, total_ds, ds_idx / total_ds * 100,
-                         ds_name, ds_row_count, elapsed_ds,
-                         ds_row_count / max(elapsed_ds, 0.01))
+                # Add namespace keys
+                row["subject_key"] = namespace_key(ds_name, row.get("subject"))
+                row["environment_key"] = namespace_key(ds_name, row.get("environment"))
+                row["location_key"] = namespace_key(ds_name, row.get("location"))
+                row["csi_path"] = str(csi_path.relative_to(out_dir))
+                row["csi_shape"] = json.dumps(list(csi_tensor.shape))
 
-        log.info("  Total: %d rows streamed to %s (%.1f MB)",
-                 total_rows, tmp_jsonl, tmp_jsonl.stat().st_size / 1024 / 1024)
+                # Serialize pose as JSON string for parquet
+                if row.get("pose") is not None:
+                    row["pose"] = json.dumps(row["pose"])
 
-        # Build quality report from incremental stats (no re-read needed)
-        seq_drops = 0
-        for seqs in seqs_by_stream.values():
-            seqs = sorted(set(seqs))
-            for a, b in zip(seqs, seqs[1:]):
-                if b > a + 1:
-                    seq_drops += b - a - 1
-        del seqs_by_stream
+                catalog_rows.append(row)
+                ds_count += 1
+                dataset_counts[ds_name] += 1
 
-        report = {
-            "rows": total_rows,
-            "datasets": dict(sorted(dataset_counts.items())),
-            "node_ids": sorted(node_id_set),
-            "node_count": len(node_id_set),
-            "seq_drops_est": seq_drops,
-            "status": "ok" if total_rows > 0 else "empty",
-            "schema_version": "silver_csi_v1",
-        }
-        del node_id_set, dataset_counts
+                if ds_count % 500 == 0:
+                    log.info("    [%s] %d samples saved (%.1fs) ...",
+                             ds_name, ds_count, time.time() - t0_ds)
 
+            elapsed_ds = time.time() - t0_ds
+            log.info("  [%d/%d %.0f%%] [%s] DONE: %d samples, %d skipped in %.1fs (%.0f samples/s)",
+                     ds_idx, total_ds, ds_idx / total_ds * 100,
+                     ds_name, ds_count, ds_skipped, elapsed_ds,
+                     ds_count / max(elapsed_ds, 0.01))
+
+        elapsed_total = time.time() - t0_total
+        total_samples = len(catalog_rows)
+        log.info("  Total: %d samples from %d datasets in %.1fs", total_samples, total_ds, elapsed_total)
+
+    # Write catalog parquet
+    if pl is not None and catalog_rows:
+        catalog_path = out_dir / "catalog.parquet"
+        df = pl.DataFrame(catalog_rows)
+        df.write_parquet(catalog_path)
+        log.info("  Wrote catalog: %s (%d rows, %.1f MB)",
+                 catalog_path, len(df), catalog_path.stat().st_size / 1024 / 1024)
+    elif catalog_rows:
+        catalog_path = out_dir / "catalog.jsonl"
+        with open(catalog_path, "w") as f:
+            for row in catalog_rows:
+                f.write(json.dumps(row) + "\n")
+        log.info("  Wrote catalog: %s (%d rows)", catalog_path, len(catalog_rows))
+
+    # Quality report
+    report = {
+        "samples": total_samples,
+        "datasets": dict(sorted(dataset_counts.items())),
+        "quality_issues": quality_issues[:100],
+        "quality_issues_total": len(quality_issues),
+        "status": "ok" if total_samples > 0 else "empty",
+        "schema_version": "silver_csi_v2",
+        "silver_dir": str(out_dir),
+    }
     report["bronze_source"] = source_report
     report["skipped"] = False
-    log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s",
-             report["rows"], list(report.get("datasets", {}).keys()), report["status"])
-
-    # Move streamed JSONL to final destination
-    out = Path(silver_out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    if is_s3_uri(silver_out):
-        with tempfile.TemporaryDirectory(prefix="rfpose-silver-report-") as tmpdir:
-            report_path = Path(tmpdir) / "quality_report.json"
-            report_path.write_text(json.dumps(report, indent=2))
-            bucket, key = parse_s3_uri(silver_out)
-            parent_prefix = key.rsplit("/", 1)[0] if "/" in key else ""
-            report_key = (
-                f"{parent_prefix}/quality_report.json"
-                if parent_prefix
-                else "quality_report.json"
-            )
-            report_uri = f"s3://{bucket}/{report_key}"
-            log.info("Uploading silver quality report uri=%s", report_uri)
-            upload_s3_file(report_path, report_uri)
-        log.info("Uploading silver data %s -> %s ...", tmp_jsonl, silver_out)
-        upload_s3_file(tmp_jsonl, silver_out)
-        tmp_jsonl.unlink(missing_ok=True)
-        log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, report["rows"])
-        return report
-
-    # Local: convert to parquet using streaming (sink_parquet) to avoid OOM
-    if pl is not None and out.suffix == ".parquet":
-        log.info("  Converting streamed JSONL to parquet (streaming) ...")
-        t0_pq = time.time()
-        try:
-            pl.scan_ndjson(tmp_jsonl).sink_parquet(out)
-            elapsed_pq = time.time() - t0_pq
-            log.info("  Wrote parquet (streaming): %s (%.1f MB) in %.1fs",
-                     out, out.stat().st_size / 1024 / 1024, elapsed_pq)
-        except Exception as e:
-            log.warning("  scan_ndjson().sink_parquet() failed (%s), falling back to chunked read ...", e)
-            import shutil
-            out_jsonl = out.with_suffix(".jsonl")
-            shutil.move(str(tmp_jsonl), str(out_jsonl))
-            log.info("  Saved as JSONL instead: %s (%.1f MB)", out_jsonl, out_jsonl.stat().st_size / 1024 / 1024)
-    else:
-        import shutil
-        shutil.move(str(tmp_jsonl), str(out))
-        log.info("  Moved JSONL to %s (%.1f MB)", out, out.stat().st_size / 1024 / 1024)
-    tmp_jsonl.unlink(missing_ok=True)
-
-    (out.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
-    log.info("Wrote silver quality report path=%s", out.parent / "quality_report.json")
-    log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, report["rows"])
+    (out_dir / "quality_report.json").write_text(json.dumps(report, indent=2))
+    log.info("DONE bronze_to_silver: %d samples, datasets=%s, status=%s",
+             report["samples"], list(report["datasets"].keys()), report["status"])
     return report
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logging.basicConfig(level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--bronze-root", required=True)
-    parser.add_argument("--silver-out", required=True)
-    parser.add_argument(
-        "--datasets",
-        default=os.getenv("RFPOSE_BRONZE_DATASETS"),
-        help=(
-            "Comma-separated dataset filter. Valid values include self_captured, "
-            "wimans, person_in_wifi_3d, wipose, mmfi, uthar, wiar."
-        ),
-    )
-    parser.add_argument(
-        "--max-samples-per-dataset",
-        type=int,
-        default=(
-            int(os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET"))
-            if os.getenv("RFPOSE_MAX_SAMPLES_PER_DATASET")
-            else None
-        ),
-    )
+    parser.add_argument("--silver-out", required=True, help="Silver OUTPUT DIRECTORY (not file)")
+    parser.add_argument("--datasets", default=os.getenv("RFPOSE_BRONZE_DATASETS"))
+    parser.add_argument("--max-samples-per-dataset", type=int, default=None)
     args = parser.parse_args()
-
-    print(
-        json.dumps(
-            bronze_to_silver(
-                args.bronze_root,
-                args.silver_out,
-                datasets=parse_dataset_filter(args.datasets),
-                max_samples_per_dataset=args.max_samples_per_dataset,
-            ),
-            indent=2,
-        )
-    )
+    print(json.dumps(bronze_to_silver(
+        args.bronze_root, args.silver_out,
+        datasets=parse_dataset_filter(args.datasets),
+        max_samples_per_dataset=args.max_samples_per_dataset,
+    ), indent=2))

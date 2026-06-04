@@ -1,54 +1,86 @@
+"""Silver → Gold ETL: read catalog + .npy CSI files, cut windows, pack NPZ.
+
+Silver input: directory with catalog.parquet + csi/<dataset>/<sample>.npy
+Gold output: directory with per-dataset x.npz, y.npz, metadata.npz
+"""
 from __future__ import annotations
 
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import argparse
 import hashlib
 import json
 import logging
+import os
 import time
+import tempfile
+
+import numpy as np
+
+try:
+    import polars as pl
+except Exception:
+    pl = None
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 POSE_JOINTS = [
-    "head",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-    "left_wrist",
-    "right_wrist",
-    "left_hip",
-    "right_hip",
-    "left_knee",
-    "right_knee",
-    "left_ankle",
-    "right_ankle",
+    "head", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+    "left_hip", "right_hip", "left_knee", "right_knee",
+    "left_ankle", "right_ankle",
 ]
 
 
-def load_silver(path: str | Path) -> list[dict]:
-    if is_s3_uri(path):
-        log.info("  [load_silver] Downloading from S3: %s ...", path)
-        with tempfile.TemporaryDirectory(prefix="rfpose-silver-in-") as tmpdir:
-            local_path = Path(tmpdir) / Path(str(path)).name
-            download_s3_file(path, local_path)
-            log.info("  [load_silver] Downloaded to %s (%.1f MB)", local_path, local_path.stat().st_size / 1024 / 1024)
-            return load_silver(local_path)
+# ---------------------------------------------------------------------------
+# Helpers (kept from original)
+# ---------------------------------------------------------------------------
 
-    path = Path(path)
-    log.info("  [load_silver] Reading local file: %s (%.1f MB)", path, path.stat().st_size / 1024 / 1024 if path.exists() else 0)
-    t0_ls = time.time()
+def is_s3_uri(value) -> bool:
+    return str(value).startswith("s3://")
 
-    if path.suffix == ".parquet" and pl is not None:
-        rows = pl.read_parquet(path).to_dicts()
-        log.info("  [load_silver] Parsed %d rows from parquet in %.1fs", len(rows), time.time() - t0_ls)
-        return rows
+def parse_s3_uri(uri) -> tuple[str, str]:
+    value = str(uri)
+    if not value.startswith("s3://"):
+        raise ValueError(f"Expected s3:// URI, got {value}")
+    without_scheme = value[len("s3://"):]
+    bucket, _, prefix = without_scheme.partition("/")
+    return bucket, prefix.strip("/")
 
-    lines = path.read_text().splitlines()
-    log.info("  [load_silver] Read %d lines, parsing JSON ...", len(lines))
-    rows = [json.loads(line) for line in lines if line.strip()]
-    log.info("  [load_silver] Parsed %d rows in %.1fs", len(rows), time.time() - t0_ls)
-    return rows
+def make_s3_client():
+    try:
+        import boto3
+    except ImportError as exc:
+        raise RuntimeError("boto3 required") from exc
+    endpoint_url = os.getenv("S3_ENDPOINT_URL") or os.getenv("AWS_ENDPOINT_URL") or "http://207.180.243.242:9000"
+    access_key = os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("MINIO_ROOT_USER")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or os.getenv("MINIO_ROOT_PASSWORD")
+    kwargs = {"endpoint_url": endpoint_url}
+    if access_key and secret_key:
+        kwargs["aws_access_key_id"] = access_key
+        kwargs["aws_secret_access_key"] = secret_key
+    return boto3.client("s3", **kwargs)
+
+def upload_s3_file(local_path: Path, s3_uri) -> dict:
+    bucket, key = parse_s3_uri(s3_uri)
+    client = make_s3_client()
+    client.upload_file(str(local_path), bucket, key)
+    return {"uri": f"s3://{bucket}/{key}", "bytes": local_path.stat().st_size}
+
+def upload_s3_directory(local_dir: Path, s3_uri) -> dict:
+    bucket, prefix = parse_s3_uri(s3_uri)
+    prefix = prefix.strip("/")
+    client = make_s3_client()
+    count, total_bytes = 0, 0
+    for path in sorted(local_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        key = f"{prefix}/{path.relative_to(local_dir).as_posix()}" if prefix else path.relative_to(local_dir).as_posix()
+        client.upload_file(str(path), bucket, key)
+        count += 1
+        total_bytes += path.stat().st_size
+    return {"uri": f"s3://{bucket}/{prefix}", "object_count": count, "total_bytes": total_bytes}
 
 
 def parse_dataset_filter(value: str | None) -> set[str] | None:
@@ -71,7 +103,6 @@ def normalize_split(split: str | None, sample_key: str) -> str:
             return "val"
         if split in {"test", "testing"}:
             return "test"
-
     frac = stable_fraction(sample_key)
     if frac < 0.8:
         return "train"
@@ -89,183 +120,6 @@ def label_index(label, label_map: dict[str, int]) -> int:
     return label_map[label]
 
 
-def pad_or_trim(values, n_subcarriers: int) -> np.ndarray:
-    arr = np.asarray(values or [], dtype=np.float32)[:n_subcarriers]
-    if len(arr) < n_subcarriers:
-        arr = np.pad(arr, (0, n_subcarriers - len(arr)), mode="constant")
-    return arr
-
-
-def infer_n_subcarriers(rows: list[dict]) -> int:
-    values = [int(row["n_subcarriers"]) for row in rows if row.get("n_subcarriers")]
-    if values:
-        return max(values)
-    lengths = [len(row.get("amplitude") or []) for row in rows]
-    if lengths:
-        return max(lengths)
-    raise ValueError("Cannot infer n_subcarriers from rows.")
-
-
-def group_silver_rows(rows: list[dict]) -> dict[tuple[str, str], list[dict]]:
-    log.info("  [group] Grouping %d rows by (dataset, sample_id) ...", len(rows))
-    t0_gr = time.time()
-    grouped = defaultdict(list)
-    skipped_no_id = 0
-    skipped_no_amp = 0
-    for row in rows:
-        if not row.get("dataset") or not row.get("sample_id"):
-            skipped_no_id += 1
-            continue
-        if not row.get("amplitude"):
-            skipped_no_amp += 1
-            continue
-        grouped[(row["dataset"], str(row["sample_id"]))].append(row)
-    ds_counts = defaultdict(int)
-    for (ds, _) in grouped:
-        ds_counts[ds] += 1
-    log.info("  [group] %d unique (dataset, sample) pairs in %.1fs | per-dataset: %s | skipped: no_id=%d no_amp=%d",
-             len(grouped), time.time() - t0_gr, dict(sorted(ds_counts.items())), skipped_no_id, skipped_no_amp)
-    return dict(grouped)
-
-
-def sample_has_phase(rows: list[dict]) -> bool:
-    return any(row.get("phase") for row in rows)
-
-
-def build_antenna_pair_tensor(rows: list[dict]) -> np.ndarray:
-    n_subcarriers = infer_n_subcarriers(rows)
-    has_phase = sample_has_phase(rows)
-    channels = 2 if has_phase else 1
-    max_time = max(int(row["timestamp_us"]) for row in rows) + 1
-    max_tx = max(int(row.get("tx") or 1) for row in rows)
-    max_rx = max(int(row.get("rx") or 1) for row in rows)
-
-    x = np.zeros((channels, max_time, max_tx, max_rx, n_subcarriers), dtype=np.float32)
-
-    for row in rows:
-        t = int(row["timestamp_us"])
-        tx = int(row.get("tx") or 1) - 1
-        rx = int(row.get("rx") or 1) - 1
-        x[0, t, tx, rx, :] = pad_or_trim(row.get("amplitude"), n_subcarriers)
-        if has_phase:
-            x[1, t, tx, rx, :] = pad_or_trim(row.get("phase"), n_subcarriers)
-
-    return x
-
-
-def build_antenna_tensor(rows: list[dict]) -> np.ndarray:
-    n_subcarriers = infer_n_subcarriers(rows)
-    has_phase = sample_has_phase(rows)
-    channels = 2 if has_phase else 1
-    max_time = max(int(row["timestamp_us"]) for row in rows) + 1
-    max_antenna = max(int(row.get("antenna") or row.get("rx") or row["node_id"]) for row in rows)
-
-    x = np.zeros((channels, max_time, max_antenna, n_subcarriers), dtype=np.float32)
-
-    for row in rows:
-        t = int(row["timestamp_us"])
-        antenna = int(row.get("antenna") or row.get("rx") or row["node_id"]) - 1
-        x[0, t, antenna, :] = pad_or_trim(row.get("amplitude"), n_subcarriers)
-        if has_phase:
-            x[1, t, antenna, :] = pad_or_trim(row.get("phase"), n_subcarriers)
-
-    return x
-
-
-def build_csi_tensor(dataset: str, rows: list[dict]) -> np.ndarray:
-    if dataset in {"wimans", "wipose", "person_in_wifi_3d", "wiar"}:
-        return build_antenna_pair_tensor(rows)
-
-    if dataset in {"mmfi", "uthar"}:
-        return build_antenna_tensor(rows)
-
-    return build_antenna_tensor(rows)
-
-
-def get_pose(rows: list[dict]) -> tuple[np.ndarray, int]:
-    for row in rows:
-        if row.get("pose") is not None:
-            pose = np.asarray(row["pose"], dtype=np.float32)
-            if pose.shape != (13, 3):
-                raise ValueError(f"Expected common pose shape [13, 3], got {pose.shape}")
-            return pose, 1
-
-    return np.zeros((13, 3), dtype=np.float32), 0
-
-
-def make_windows(x: np.ndarray, window_frames: int, stride: int) -> list[tuple[int, np.ndarray]]:
-    time_steps = x.shape[1]
-    if time_steps < window_frames:
-        return []
-
-    windows = []
-    for start in range(0, time_steps - window_frames + 1, stride):
-        windows.append((start, x[:, start : start + window_frames, ...]))
-    return windows
-
-
-def build_gold_records(
-    grouped: dict[tuple[str, str], list[dict]],
-    *,
-    window_frames: int,
-    stride: int,
-) -> tuple[dict[str, list[dict]], dict[str, dict[str, int]]]:
-    label_maps = {
-        "activity": {},
-        "location": {},
-        "environment": {},
-        "subject": {},
-    }
-    records_by_dataset = defaultdict(list)
-
-    total_pairs = len(grouped)
-    log.info("  [build_gold] Processing %d (dataset, sample) pairs into windowed records ...", total_pairs)
-    t0_bg = time.time()
-    pair_idx = 0
-    for (dataset, sample_id), rows in sorted(grouped.items()):
-        pair_idx += 1
-        rows = sorted(rows, key=lambda row: (int(row["timestamp_us"]), int(row["node_id"])))
-        first = rows[0]
-        sample_key = f"{dataset}:{sample_id}"
-        split = normalize_split(first.get("split"), sample_key)
-        x = build_csi_tensor(dataset, rows)
-        pose, pose_mask = get_pose(rows)
-
-        activity_id = label_index(first.get("activity"), label_maps["activity"])
-        location_id = label_index(first.get("location_key") or first.get("location"), label_maps["location"])
-        environment_id = label_index(
-            first.get("environment_key") or first.get("environment"),
-            label_maps["environment"],
-        )
-        subject_id = label_index(first.get("subject_key") or first.get("subject"), label_maps["subject"])
-
-        for window_start, window_x in make_windows(x, window_frames, stride):
-            records_by_dataset[dataset].append(
-                {
-                    "split": split,
-                    "sample_id": sample_id,
-                    "window_start": window_start,
-                    "x": window_x.astype(np.float32),
-                    "pose": pose,
-                    "pose_mask": pose_mask,
-                    "activity_id": activity_id,
-                    "activity_mask": int(activity_id >= 0),
-                    "location_id": location_id,
-                    "location_mask": int(location_id >= 0),
-                    "environment_id": environment_id,
-                    "environment_mask": int(environment_id >= 0),
-                    "subject_id": subject_id,
-                    "subject_mask": int(subject_id >= 0),
-                }
-            )
-        if pair_idx % 50 == 0 or pair_idx == total_pairs:
-            total_recs = sum(len(v) for v in records_by_dataset.values())
-            log.info("  [build_gold] Pair %d/%d (%.0f%%) | %d total windows so far | %.1fs",
-                     pair_idx, total_pairs, pair_idx / total_pairs * 100, total_recs, time.time() - t0_bg)
-
-    return dict(records_by_dataset), label_maps
-
-
 def one_hot(ids: np.ndarray, num_classes: int) -> np.ndarray:
     y = np.zeros((len(ids), num_classes), dtype=np.float32)
     valid = ids >= 0
@@ -274,26 +128,149 @@ def one_hot(ids: np.ndarray, num_classes: int) -> np.ndarray:
     return y
 
 
-def records_to_arrays(records: list[dict], label_maps: dict[str, dict[str, int]]) -> dict[str, np.ndarray]:
-    x = np.stack([record["x"] for record in records]).astype(np.float32)
-    activity_id = np.asarray([record["activity_id"] for record in records], dtype=np.int64)
+# ---------------------------------------------------------------------------
+# Load silver catalog
+# ---------------------------------------------------------------------------
 
-    arrays = {
-        "X": x,
-        "pose": np.stack([record["pose"] for record in records]).astype(np.float32),
-        "pose_mask": np.asarray([record["pose_mask"] for record in records], dtype=np.int64),
-        "activity": one_hot(activity_id, len(label_maps["activity"])),
-        "activity_id": activity_id,
-        "activity_mask": np.asarray([record["activity_mask"] for record in records], dtype=np.int64),
-        "location_id": np.asarray([record["location_id"] for record in records], dtype=np.int64),
-        "location_mask": np.asarray([record["location_mask"] for record in records], dtype=np.int64),
-        "environment_id": np.asarray([record["environment_id"] for record in records], dtype=np.int64),
-        "environment_mask": np.asarray([record["environment_mask"] for record in records], dtype=np.int64),
-        "subject_id": np.asarray([record["subject_id"] for record in records], dtype=np.int64),
-        "subject_mask": np.asarray([record["subject_mask"] for record in records], dtype=np.int64),
-    }
-    return arrays
+def load_catalog(silver_dir: str | Path) -> list[dict]:
+    silver_dir = Path(silver_dir)
+    parquet_path = silver_dir / "catalog.parquet"
+    jsonl_path = silver_dir / "catalog.jsonl"
 
+    if parquet_path.exists() and pl is not None:
+        log.info("  [load_catalog] Reading %s ...", parquet_path)
+        rows = pl.read_parquet(parquet_path).to_dicts()
+    elif jsonl_path.exists():
+        log.info("  [load_catalog] Reading %s ...", jsonl_path)
+        lines = jsonl_path.read_text().splitlines()
+        rows = [json.loads(line) for line in lines if line.strip()]
+    else:
+        raise FileNotFoundError(f"No catalog found in {silver_dir}")
+
+    log.info("  [load_catalog] Loaded %d samples", len(rows))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Window cutting & gold record building
+# ---------------------------------------------------------------------------
+
+def make_windows(csi: np.ndarray, window_frames: int, stride: int) -> list[tuple[int, np.ndarray]]:
+    """Cut sliding windows along time axis (axis=1)."""
+    T = csi.shape[1]
+    if T < window_frames:
+        return []
+    windows = []
+    for start in range(0, T - window_frames + 1, stride):
+        windows.append((start, csi[:, start:start + window_frames, ...]))
+    return windows
+
+
+def build_gold_from_catalog(
+    catalog: list[dict],
+    silver_dir: Path,
+    *,
+    window_frames: int,
+    stride: int,
+    datasets_filter: set[str] | None = None,
+    max_samples_per_dataset: int | None = None,
+) -> tuple[dict[str, list[dict]], dict[str, dict[str, int]]]:
+
+    label_maps = {"activity": {}, "location": {}, "environment": {}, "subject": {}}
+    records_by_dataset = defaultdict(list)
+
+    # Filter catalog
+    if datasets_filter:
+        catalog = [r for r in catalog if r.get("dataset") in datasets_filter]
+
+    # Apply max_samples_per_dataset
+    if max_samples_per_dataset is not None:
+        seen = defaultdict(int)
+        filtered = []
+        for row in catalog:
+            ds = row.get("dataset")
+            if seen[ds] < max_samples_per_dataset:
+                filtered.append(row)
+                seen[ds] += 1
+        catalog = filtered
+
+    total = len(catalog)
+    log.info("  [build_gold] Processing %d samples (window=%d, stride=%d) ...", total, window_frames, stride)
+    t0 = time.time()
+    skipped_short = 0
+    skipped_load = 0
+
+    for idx, row in enumerate(catalog):
+        dataset = row["dataset"]
+        sample_id = row["sample_id"]
+        csi_path = silver_dir / row["csi_path"]
+
+        # Load CSI tensor
+        try:
+            csi = np.load(csi_path).astype(np.float32)
+        except Exception as e:
+            log.warning("  [build_gold] Failed to load %s: %s", csi_path, e)
+            skipped_load += 1
+            continue
+
+        # Cut windows
+        windows = make_windows(csi, window_frames, stride)
+        if not windows:
+            skipped_short += 1
+            continue
+
+        # Parse pose
+        pose_data = row.get("pose")
+        if pose_data is not None:
+            if isinstance(pose_data, str):
+                pose_data = json.loads(pose_data)
+            pose = np.asarray(pose_data, dtype=np.float32).reshape(13, 3)
+            pose_mask = 1
+        else:
+            pose = np.zeros((13, 3), dtype=np.float32)
+            pose_mask = 0
+
+        # Labels
+        sample_key = f"{dataset}:{sample_id}"
+        split = normalize_split(row.get("split"), sample_key)
+        activity_id = label_index(row.get("activity"), label_maps["activity"])
+        location_id = label_index(row.get("location_key") or row.get("location"), label_maps["location"])
+        environment_id = label_index(row.get("environment_key") or row.get("environment"), label_maps["environment"])
+        subject_id = label_index(row.get("subject_key") or row.get("subject"), label_maps["subject"])
+
+        for window_start, window_x in windows:
+            records_by_dataset[dataset].append({
+                "split": split,
+                "sample_id": sample_id,
+                "window_start": window_start,
+                "x": window_x,
+                "pose": pose,
+                "pose_mask": pose_mask,
+                "activity_id": activity_id,
+                "activity_mask": int(activity_id >= 0),
+                "location_id": location_id,
+                "location_mask": int(location_id >= 0),
+                "environment_id": environment_id,
+                "environment_mask": int(environment_id >= 0),
+                "subject_id": subject_id,
+                "subject_mask": int(subject_id >= 0),
+            })
+
+        if (idx + 1) % 500 == 0 or idx + 1 == total:
+            total_windows = sum(len(v) for v in records_by_dataset.values())
+            log.info("  [build_gold] %d/%d samples (%.0f%%) | %d windows | %d short-skipped | %.1fs",
+                     idx + 1, total, (idx + 1) / total * 100, total_windows, skipped_short, time.time() - t0)
+
+    total_windows = sum(len(v) for v in records_by_dataset.values())
+    log.info("  [build_gold] DONE: %d windows from %d datasets | %d short-skipped | %d load-errors | %.1fs",
+             total_windows, len(records_by_dataset), skipped_short, skipped_load, time.time() - t0)
+
+    return dict(records_by_dataset), label_maps
+
+
+# ---------------------------------------------------------------------------
+# Write gold NPZ files
+# ---------------------------------------------------------------------------
 
 def write_dataset(
     out: Path,
@@ -305,116 +282,63 @@ def write_dataset(
     stride: int,
 ) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    metadata = np.asarray(
-        [
-            {
-                "dataset": dataset,
-                "sample_id": record["sample_id"],
-                "split": record["split"],
-                "window_start": record["window_start"],
-            }
-            for record in records
-        ],
-        dtype=object,
-    )
+    log.info("    [write/%s] Stacking %d records ...", dataset, len(records))
+    t0 = time.time()
 
-    log.info("    [write_dataset/%s] Converting %d records to arrays ...", dataset, len(records))
-    t0_wd = time.time()
-    all_arrays = records_to_arrays(records, label_maps)
-    log.info("    [write_dataset/%s] Arrays built: X=%s (%.1f MB) | pose=%s | in %.1fs",
-             dataset, list(all_arrays["X"].shape),
-             all_arrays["X"].nbytes / 1024 / 1024,
-             list(all_arrays["pose"].shape),
-             time.time() - t0_wd)
-    log.info("    [write_dataset/%s] Writing x.npz ...", dataset)
-    np.savez_compressed(out / "x.npz", X=all_arrays["X"])
-    log.info("    [write_dataset/%s] Writing y.npz ...", dataset)
-    np.savez_compressed(
-        out / "y.npz",
-        pose=all_arrays["pose"],
-        pose_mask=all_arrays["pose_mask"],
-        activity=all_arrays["activity"],
-        activity_id=all_arrays["activity_id"],
-        activity_mask=all_arrays["activity_mask"],
-        location_id=all_arrays["location_id"],
-        location_mask=all_arrays["location_mask"],
-        environment_id=all_arrays["environment_id"],
-        environment_mask=all_arrays["environment_mask"],
-        subject_id=all_arrays["subject_id"],
-        subject_mask=all_arrays["subject_mask"],
+    x = np.stack([r["x"] for r in records]).astype(np.float32)
+    activity_id = np.asarray([r["activity_id"] for r in records], dtype=np.int64)
+
+    log.info("    [write/%s] X shape=%s (%.1f MB)", dataset, x.shape, x.nbytes / 1024 / 1024)
+
+    np.savez_compressed(out / "x.npz", X=x)
+    np.savez_compressed(out / "y.npz",
+        pose=np.stack([r["pose"] for r in records]).astype(np.float32),
+        pose_mask=np.asarray([r["pose_mask"] for r in records], dtype=np.int64),
+        activity=one_hot(activity_id, len(label_maps["activity"])),
+        activity_id=activity_id,
+        activity_mask=np.asarray([r["activity_mask"] for r in records], dtype=np.int64),
+        location_id=np.asarray([r["location_id"] for r in records], dtype=np.int64),
+        location_mask=np.asarray([r["location_mask"] for r in records], dtype=np.int64),
+        environment_id=np.asarray([r["environment_id"] for r in records], dtype=np.int64),
+        environment_mask=np.asarray([r["environment_mask"] for r in records], dtype=np.int64),
+        subject_id=np.asarray([r["subject_id"] for r in records], dtype=np.int64),
+        subject_mask=np.asarray([r["subject_mask"] for r in records], dtype=np.int64),
     )
-    log.info("    [write_dataset/%s] Writing metadata.npz ...", dataset)
-    np.savez_compressed(out / "metadata.npz", metadata=metadata)
+    np.savez_compressed(out / "metadata.npz", metadata=np.asarray([
+        {"dataset": dataset, "sample_id": r["sample_id"], "split": r["split"], "window_start": r["window_start"]}
+        for r in records
+    ], dtype=object))
 
     split_counts = defaultdict(int)
-    for record in records:
-        split_counts[record["split"]] += 1
+    for r in records:
+        split_counts[r["split"]] += 1
 
-    normalization = {
-        "mean": float(all_arrays["X"].mean()),
-        "std": float(all_arrays["X"].std() + 1e-6),
-    }
+    normalization = {"mean": float(x.mean()), "std": float(x.std() + 1e-6)}
     stats = {
-        "dataset": dataset,
-        "num_samples": len(records),
+        "dataset": dataset, "num_samples": len(records),
         "splits": dict(sorted(split_counts.items())),
-        "x_shape": list(all_arrays["X"].shape),
-        "pose_shape": list(all_arrays["pose"].shape),
-        "window_frames": window_frames,
-        "stride": stride,
+        "x_shape": list(x.shape),
+        "pose_shape": [len(records), 13, 3],
+        "window_frames": window_frames, "stride": stride,
         "pose_joints": POSE_JOINTS,
     }
-    manifest = {
-        **stats,
-        "files": {
-            "x": "x.npz",
-            "y": "y.npz",
-            "metadata": "metadata.npz",
-            "label_maps": "label_maps.json",
-            "stats": "stats.json",
-            "normalization": "normalization.json",
-        },
-    }
-
+    manifest = {**stats, "files": {"x": "x.npz", "y": "y.npz", "metadata": "metadata.npz",
+                                    "label_maps": "label_maps.json", "stats": "stats.json", "normalization": "normalization.json"}}
     (out / "label_maps.json").write_text(json.dumps(label_maps, indent=2, sort_keys=True))
     (out / "stats.json").write_text(json.dumps(stats, indent=2))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (out / "normalization.json").write_text(json.dumps(normalization, indent=2))
+    del x
+    log.info("    [write/%s] DONE in %.1fs", dataset, time.time() - t0)
     return stats
 
 
-def filter_rows(
-    rows: list[dict],
-    *,
-    datasets: set[str] | None,
-    max_samples_per_dataset: int | None,
-) -> list[dict]:
-    before = len(rows)
-    if datasets is not None:
-        rows = [row for row in rows if row.get("dataset") in datasets]
-        log.info("  [filter_rows] Dataset filter: %d -> %d rows (kept datasets: %s)", before, len(rows), sorted(datasets))
-    else:
-        all_ds = sorted({row.get("dataset") for row in rows})
-        log.info("  [filter_rows] No dataset filter, all datasets: %s (%d rows)", all_ds, len(rows))
-
-    if max_samples_per_dataset is None:
-        return rows
-
-    seen = defaultdict(set)
-    filtered = []
-    for row in rows:
-        dataset = row.get("dataset")
-        sample_id = str(row.get("sample_id"))
-        if len(seen[dataset]) >= max_samples_per_dataset and sample_id not in seen[dataset]:
-            continue
-        seen[dataset].add(sample_id)
-        filtered.append(row)
-    log.info("  [filter_rows] Max samples filter (%d/ds): %d -> %d rows", max_samples_per_dataset, len(rows), len(filtered))
-    return filtered
-
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def silver_to_gold(
-    silver_path: str | Path,
+    silver_dir: str | Path,
     gold_dir: str | Path,
     *,
     datasets: set[str] | None = None,
@@ -423,91 +347,51 @@ def silver_to_gold(
     max_samples_per_dataset: int | None = None,
     force: bool = False,
 ) -> dict:
-    # --- Idempotent check ---
+    # Idempotent check
     if not force and not is_s3_uri(gold_dir):
         summary_path = Path(gold_dir) / "summary.json"
         if summary_path.exists():
             try:
                 cached = json.loads(summary_path.read_text())
                 cached["skipped"] = True
-                log.info("SKIP silver_to_gold: output exists at %s (%d samples)", gold_dir, cached.get("num_samples", 0))
+                log.info("SKIP silver_to_gold: output exists at %s", gold_dir)
                 return cached
             except Exception:
                 pass
-    elif not force and is_s3_uri(gold_dir):
-        try:
-            bucket, prefix = parse_s3_uri(gold_dir)
-            summary_key = f"{prefix.rstrip('/')}/summary.json"
-            client = make_s3_client()
-            resp = client.get_object(Bucket=bucket, Key=summary_key)
-            cached = json.loads(resp["Body"].read().decode())
-            cached["skipped"] = True
-            log.info("SKIP silver_to_gold: S3 output exists at %s (%d samples)", gold_dir, cached.get("num_samples", 0))
-            return cached
-        except Exception:
-            pass
 
-    log.info("START silver_to_gold: silver=%s -> gold=%s (datasets=%s, window=%d, stride=%d)",
-             silver_path, gold_dir, datasets, window_frames, stride)
+    log.info("START silver_to_gold: silver=%s -> gold=%s (window=%d, stride=%d)", silver_dir, gold_dir, window_frames, stride)
     t0 = time.time()
 
-    log.info("  Loading silver data from %s ...", silver_path)
-    rows = load_silver(silver_path)
-    log.info("  Loaded %d raw rows", len(rows))
-    rows = filter_rows(
-        rows,
-        datasets=datasets,
+    silver_dir = Path(silver_dir)
+    catalog = load_catalog(silver_dir)
+
+    records_by_dataset, label_maps = build_gold_from_catalog(
+        catalog, silver_dir,
+        window_frames=window_frames, stride=stride,
+        datasets_filter=datasets,
         max_samples_per_dataset=max_samples_per_dataset,
-    )
-    filtered_datasets = sorted(
-        str(dataset) for dataset in {row.get("dataset") for row in rows}
-    )
-    log.info("Filtered silver rows count=%d datasets=%s", len(rows), filtered_datasets)
-    grouped = group_silver_rows(rows)
-    log.info("  Grouped into %d unique (dataset, sample) pairs", len(grouped))
-    records_by_dataset, label_maps = build_gold_records(
-        grouped,
-        window_frames=window_frames,
-        stride=stride,
-    )
-    log.info(
-        "Built gold records datasets=%s sample_counts=%s",
-        sorted(records_by_dataset.keys()),
-        {dataset: len(records) for dataset, records in sorted(records_by_dataset.items())},
     )
 
     if not records_by_dataset:
         raise RuntimeError(
-            "No gold windows were created. Check dataset filter, window_frames, "
-            "and whether silver rows contain enough timestamps."
+            "No gold windows created. Check window_frames vs dataset timesteps. "
+            f"Current window_frames={window_frames}."
         )
 
+    # Handle S3 output
     if is_s3_uri(gold_dir):
         with tempfile.TemporaryDirectory(prefix="rfpose-gold-") as tmpdir:
-            local_gold_dir = Path(tmpdir) / "gold"
+            local_gold = Path(tmpdir) / "gold"
             summary = silver_to_gold(
-                silver_path,
-                local_gold_dir,
-                datasets=datasets,
-                window_frames=window_frames,
-                stride=stride,
-                max_samples_per_dataset=max_samples_per_dataset,
+                silver_dir, local_gold,
+                datasets=datasets, window_frames=window_frames,
+                stride=stride, max_samples_per_dataset=max_samples_per_dataset,
             )
-            upload_report = upload_s3_directory(local_gold_dir, gold_dir)
-            summary["artifact_uri"] = str(gold_dir)
+            upload_report = upload_s3_directory(local_gold, gold_dir)
             summary["upload"] = upload_report
-            log.info(
-                "Uploaded gold dataset directory uri=%s object_count=%d bytes=%d",
-                upload_report["uri"],
-                upload_report["object_count"],
-                upload_report["total_bytes"],
-            )
-
-            summary_path = local_gold_dir / "summary.json"
+            summary_path = local_gold / "summary.json"
             summary_path.write_text(json.dumps(summary, indent=2))
-            summary_uri = f"{str(gold_dir).rstrip('/')}/summary.json"
-            upload_s3_file(summary_path, summary_uri)
-            log.info("Uploaded gold summary uri=%s", summary_uri)
+            upload_s3_file(summary_path, f"{str(gold_dir).rstrip('/')}/summary.json")
             return summary
 
     out = Path(gold_dir)
@@ -516,23 +400,18 @@ def silver_to_gold(
     stats_by_dataset = {}
     total_ds = len(records_by_dataset)
     for ds_idx, (dataset, records) in enumerate(sorted(records_by_dataset.items()), 1):
-        dataset_out = out if len(records_by_dataset) == 1 else out / dataset
-        log.info("  [%d/%d %.0f%%] Writing dataset '%s': %d records -> %s", ds_idx, total_ds, ds_idx / total_ds * 100, dataset, len(records), dataset_out)
+        dataset_out = out if total_ds == 1 else out / dataset
+        log.info("  [%d/%d] Writing '%s': %d windows -> %s", ds_idx, total_ds, dataset, len(records), dataset_out)
         stats_by_dataset[dataset] = write_dataset(
-            dataset_out,
-            dataset,
-            records,
-            label_maps,
-            window_frames=window_frames,
-            stride=stride,
+            dataset_out, dataset, records, label_maps,
+            window_frames=window_frames, stride=stride,
         )
 
     summary = {
         "datasets": stats_by_dataset,
         "num_datasets": len(stats_by_dataset),
-        "num_samples": sum(stats["num_samples"] for stats in stats_by_dataset.values()),
-        "window_frames": window_frames,
-        "stride": stride,
+        "num_samples": sum(s["num_samples"] for s in stats_by_dataset.values()),
+        "window_frames": window_frames, "stride": stride,
         "label_maps": "label_maps.json",
         "artifact_uri": str(gold_dir),
     }
@@ -540,39 +419,24 @@ def silver_to_gold(
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     summary["skipped"] = False
     elapsed = time.time() - t0
-    log.info("DONE silver_to_gold: %d datasets, %d total samples in %.1fs",
+    log.info("DONE silver_to_gold: %d datasets, %d total windows in %.1fs",
              summary["num_datasets"], summary["num_samples"], elapsed)
     return summary
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logging.basicConfig(level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--silver-path", required=True)
+    parser.add_argument("--silver-dir", required=True, help="Silver directory with catalog + csi/")
     parser.add_argument("--gold-dir", required=True)
-    parser.add_argument(
-        "--datasets",
-        default=os.getenv("RFPOSE_GOLD_DATASETS"),
-        help="Comma-separated dataset filter, e.g. wimans,mmfi,wipose.",
-    )
+    parser.add_argument("--datasets", default=os.getenv("RFPOSE_GOLD_DATASETS"))
     parser.add_argument("--window-frames", type=int, default=60)
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--max-samples-per-dataset", type=int, default=None)
     args = parser.parse_args()
-
-    print(
-        json.dumps(
-            silver_to_gold(
-                args.silver_path,
-                args.gold_dir,
-                datasets=parse_dataset_filter(args.datasets),
-                window_frames=args.window_frames,
-                stride=args.stride,
-                max_samples_per_dataset=args.max_samples_per_dataset,
-            ),
-            indent=2,
-        )
-    )
+    print(json.dumps(silver_to_gold(
+        args.silver_dir, args.gold_dir,
+        datasets=parse_dataset_filter(args.datasets),
+        window_frames=args.window_frames, stride=args.stride,
+        max_samples_per_dataset=args.max_samples_per_dataset,
+    ), indent=2))
