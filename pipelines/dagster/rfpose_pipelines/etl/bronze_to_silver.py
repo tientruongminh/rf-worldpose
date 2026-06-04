@@ -1003,50 +1003,101 @@ def bronze_to_silver(
     with materialized_bronze_root(bronze_root) as (local_bronze_root, source_report):
         log.info("  Bronze source: %s", source_report.get("source_type", "local"))
 
-        # Collect self_captured rows (usually small)
-        rows = []
-        if datasets is None or "self_captured" in datasets:
-            log.info("  [self_captured] Processing ...")
-            self_rows = list(iter_json_packet_rows(local_bronze_root))
-            rows.extend(self_rows)
-            log.info("  [self_captured] Done: %d rows", len(self_rows))
+        # --- Stream rows to a temp JSONL file to avoid OOM ---
+        # We never hold all rows in memory; write each row to disk immediately
+        # and track quality metrics incrementally.
+        tmp_jsonl = Path(tempfile.mktemp(prefix="rfpose-silver-stream-", suffix=".jsonl"))
+        tmp_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
-        # Process public datasets in parallel
-        dataset_tasks = []
-        for ds_name, ds_root in existing_dataset_roots(local_bronze_root).items():
-            if datasets is not None and ds_name not in datasets:
-                log.info("  [%s] Skipped (not in filter)", ds_name)
-                continue
-            if not ds_root.exists():
-                log.info("  [%s] Skipped (not found: %s)", ds_name, ds_root)
-                continue
-            dataset_tasks.append((ds_name, str(ds_root), ds_name, max_samples_per_dataset))
+        total_rows = 0
+        dataset_counts = Counter()
+        node_id_set = set()
+        seqs_by_stream = defaultdict(list)
 
-        if dataset_tasks:
-            num_workers = min(len(dataset_tasks), 2)
-            log.info("  Processing %d datasets in parallel (%d workers) ...", len(dataset_tasks), num_workers)
-            with ProcessPoolExecutor(max_workers=num_workers) as pool:
-                futures = {pool.submit(_process_single_dataset, task): task[0] for task in dataset_tasks}
-                done_count = 0
-                for future in as_completed(futures):
-                    ds_name = futures[future]
-                    done_count += 1
-                    try:
-                        name, ds_rows = future.result()
-                        rows.extend(ds_rows)
-                        log.info("  [%d/%d %.0f%%] [%s] Done: %d rows",
-                                 done_count, len(dataset_tasks),
-                                 done_count / len(dataset_tasks) * 100,
-                                 name, len(ds_rows))
-                    except Exception as exc:
-                        log.error("  [%s] FAILED: %s", ds_name, exc)
+        converters = {
+            "wimans": iter_wimans_rows,
+            "person_in_wifi_3d": iter_person_wifi_rows,
+            "wipose": iter_wipose_rows,
+            "mmfi": iter_mmfi_rows,
+            "uthar": iter_uthar_rows,
+            "wiar": iter_wiar_rows,
+        }
 
-        log.info("  Total: %d rows from %d datasets", len(rows), len(dataset_tasks) + (1 if rows else 0))
+        def _all_row_sources():
+            if datasets is None or "self_captured" in datasets:
+                log.info("  [self_captured] Processing ...")
+                yield "self_captured", iter_json_packet_rows(local_bronze_root)
+            all_ds = list(existing_dataset_roots(local_bronze_root).items())
+            for ds_name, ds_root in all_ds:
+                if datasets is not None and ds_name not in datasets:
+                    log.info("  [%s] Skipped (not in filter)", ds_name)
+                    continue
+                if not ds_root.exists():
+                    log.info("  [%s] Skipped (not found: %s)", ds_name, ds_root)
+                    continue
+                yield ds_name, converters[ds_name](ds_root, max_samples=max_samples_per_dataset)
 
-    report = build_quality_report(rows)
+        sources = list(_all_row_sources())
+        total_ds = len(sources)
+
+        with open(tmp_jsonl, "w") as fout:
+            for ds_idx, (ds_name, row_iter) in enumerate(sources, 1):
+                t0_ds = time.time()
+                log.info("  [%d/%d] [%s] START ...", ds_idx, total_ds, ds_name)
+                ds_row_count = 0
+                for row in row_iter:
+                    line = json.dumps(row)
+                    fout.write(line)
+                    fout.write("\n")
+                    total_rows += 1
+                    ds_row_count += 1
+                    dataset_counts[row.get("dataset", ds_name)] += 1
+                    nid = row.get("node_id")
+                    if nid is not None:
+                        node_id_set.add(nid)
+                    if row.get("seq") is not None and nid is not None:
+                        key = (row.get("dataset"), row.get("sample_id"), nid)
+                        seqs_by_stream[key].append(int(row["seq"]))
+                    if ds_row_count % 100000 == 0:
+                        log.info("    [%s] %d rows streamed (%.1fs) ...",
+                                 ds_name, ds_row_count, time.time() - t0_ds)
+                elapsed_ds = time.time() - t0_ds
+                log.info("  [%d/%d %.0f%%] [%s] DONE: %d rows in %.1fs (%.0f rows/s)",
+                         ds_idx, total_ds, ds_idx / total_ds * 100,
+                         ds_name, ds_row_count, elapsed_ds,
+                         ds_row_count / max(elapsed_ds, 0.01))
+
+        log.info("  Total: %d rows streamed to %s (%.1f MB)",
+                 total_rows, tmp_jsonl, tmp_jsonl.stat().st_size / 1024 / 1024)
+
+        # Build quality report from incremental stats (no re-read needed)
+        seq_drops = 0
+        for seqs in seqs_by_stream.values():
+            seqs = sorted(set(seqs))
+            for a, b in zip(seqs, seqs[1:]):
+                if b > a + 1:
+                    seq_drops += b - a - 1
+        del seqs_by_stream
+
+        report = {
+            "rows": total_rows,
+            "datasets": dict(sorted(dataset_counts.items())),
+            "node_ids": sorted(node_id_set),
+            "node_count": len(node_id_set),
+            "seq_drops_est": seq_drops,
+            "status": "ok" if total_rows > 0 else "empty",
+            "schema_version": "silver_csi_v1",
+        }
+        del node_id_set, dataset_counts
+
     report["bronze_source"] = source_report
     report["skipped"] = False
-    log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s", report["rows"], list(report.get("datasets", {}).keys()), report["status"])
+    log.info("DONE bronze_to_silver: %d rows, datasets=%s, status=%s",
+             report["rows"], list(report.get("datasets", {}).keys()), report["status"])
+
+    # Move streamed JSONL to final destination
+    out = Path(silver_out)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     if is_s3_uri(silver_out):
         with tempfile.TemporaryDirectory(prefix="rfpose-silver-report-") as tmpdir:
@@ -1062,15 +1113,30 @@ def bronze_to_silver(
             report_uri = f"s3://{bucket}/{report_key}"
             log.info("Uploading silver quality report uri=%s", report_uri)
             upload_s3_file(report_path, report_uri)
-        write_rows(rows, silver_out)
-        log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
+        log.info("Uploading silver data %s -> %s ...", tmp_jsonl, silver_out)
+        upload_s3_file(tmp_jsonl, silver_out)
+        tmp_jsonl.unlink(missing_ok=True)
+        log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, report["rows"])
         return report
 
-    write_rows(rows, silver_out)
-    out = Path(silver_out)
+    # Local: convert to parquet if possible, otherwise just move the jsonl
+    if pl is not None and out.suffix == ".parquet":
+        log.info("  Converting streamed JSONL to parquet ...")
+        t0_pq = time.time()
+        df = pl.read_ndjson(tmp_jsonl)
+        df.write_parquet(out)
+        log.info("  Wrote parquet: %s (%d rows, %.1f MB) in %.1fs",
+                 out, len(df), out.stat().st_size / 1024 / 1024, time.time() - t0_pq)
+        del df
+    else:
+        import shutil
+        shutil.move(str(tmp_jsonl), str(out))
+        log.info("  Moved JSONL to %s (%.1f MB)", out, out.stat().st_size / 1024 / 1024)
+    tmp_jsonl.unlink(missing_ok=True)
+
     (out.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
     log.info("Wrote silver quality report path=%s", out.parent / "quality_report.json")
-    log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, len(rows))
+    log.info("Finished bronze_to_silver silver_out=%s rows=%d", silver_out, report["rows"])
     return report
 
 
