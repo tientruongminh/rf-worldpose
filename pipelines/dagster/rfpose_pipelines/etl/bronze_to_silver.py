@@ -1023,7 +1023,7 @@ def bronze_to_silver(
             dataset_tasks.append((ds_name, str(ds_root), ds_name, max_samples_per_dataset))
 
         if dataset_tasks:
-            num_workers = min(len(dataset_tasks), 4)
+            num_workers = min(len(dataset_tasks), 2)
             log.info("  Processing %d datasets in parallel (%d workers) ...", len(dataset_tasks), num_workers)
             with ProcessPoolExecutor(max_workers=num_workers) as pool:
                 futures = {pool.submit(_process_single_dataset, task): task[0] for task in dataset_tasks}
