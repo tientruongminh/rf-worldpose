@@ -220,7 +220,7 @@ def gold_quality_report(context, gold_multitask_dataset):
         if not gold_dir_value.startswith("s3://"):
             gold_dir = Path(gold_dir_value)
             dataset_dir = gold_dir if summary["num_datasets"] == 1 else gold_dir / dataset
-            for f in ["x.npz", "y.npz", "metadata.npz", "manifest.json", "stats.json", "normalization.json"]:
+            for f in ["x.npy", "y.npz", "metadata.npz", "manifest.json", "stats.json", "normalization.json"]:
                 if not (dataset_dir / f).exists():
                     dataset_missing.append(str(dataset_dir / f))
 

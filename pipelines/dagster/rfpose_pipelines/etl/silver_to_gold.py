@@ -210,13 +210,27 @@ def process_one_dataset(
     n_padded: int,
     c_unified: int = 2,
 ) -> dict | None:
-    """Process a single dataset: load CSI, flatten+pad+normalize, cut windows, write NPZ."""
+    """Process a single dataset using disk-backed memmap for X to avoid OOM."""
     log.info("  [gold/%s] Processing %d samples (n_padded=%d) ...", dataset_name, len(samples), n_padded)
     t0 = time.time()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    records = []
+    max_windows = len(samples) * MAX_WINDOWS_PER_SAMPLE
+    window_shape = (c_unified, window_frames, n_padded)
+
+    # Disk-backed X array (memmap): only ~130KB per slot in memory page cache
+    x_tmp_path = out_dir / "_x_tmp.npy"
+    x_mmap = np.lib.format.open_memmap(
+        str(x_tmp_path), mode="w+", dtype=np.float32,
+        shape=(max_windows, *window_shape),
+    )
+
+    meta_records = []  # lightweight: no numpy X arrays
+    write_idx = 0
     skipped_short = 0
     skipped_load = 0
+    norm_means = []
+    norm_stds = []
 
     for idx, row in enumerate(samples):
         sample_id = row["sample_id"]
@@ -227,11 +241,10 @@ def process_one_dataset(
             csi = np.load(csi_path, mmap_mode="r")
             csi_data = csi[:]
             del csi
-        except Exception as e:
+        except Exception:
             skipped_load += 1
             continue
 
-        # Flatten, pad, normalize on-the-fly
         csi_unified = flatten_pad_normalize(csi_data, n_padded, c_unified)
         del csi_data
 
@@ -241,7 +254,6 @@ def process_one_dataset(
             skipped_short += 1
             continue
 
-        # Parse pose
         pose_data = row.get("pose")
         if pose_data is not None and pose_data != "":
             if isinstance(pose_data, str):
@@ -260,13 +272,12 @@ def process_one_dataset(
         subject_id = label_index(row.get("subject_key") or row.get("subject"), label_maps["subject"])
 
         for window_start, window_x in windows:
-            records.append({
-                "split": split,
-                "sample_id": sample_id,
+            x_mmap[write_idx] = window_x
+            write_idx += 1
+            meta_records.append({
+                "split": split, "sample_id": sample_id,
                 "window_start": window_start,
-                "x": window_x,
-                "pose": pose,
-                "pose_mask": pose_mask,
+                "pose": pose, "pose_mask": pose_mask,
                 "activity_id": activity_id,
                 "activity_mask": int(activity_id >= 0),
                 "location_id": location_id,
@@ -276,78 +287,81 @@ def process_one_dataset(
                 "subject_id": subject_id,
                 "subject_mask": int(subject_id >= 0),
             })
+
+            if len(norm_means) < 1000:
+                norm_means.append(float(window_x.mean()))
+                norm_stds.append(float(window_x.std()))
         del windows
 
         if (idx + 1) % 1000 == 0:
             log.info("    [gold/%s] %d/%d samples | %d windows | %.1fs",
-                     dataset_name, idx + 1, len(samples), len(records), time.time() - t0)
+                     dataset_name, idx + 1, len(samples), write_idx, time.time() - t0)
 
-    if not records:
-        log.info("  [gold/%s] No windows generated (short=%d, load_err=%d)", dataset_name, skipped_short, skipped_load)
+    x_mmap.flush()
+    del x_mmap
+
+    if write_idx == 0:
+        log.info("  [gold/%s] No windows (short=%d, load_err=%d)", dataset_name, skipped_short, skipped_load)
+        x_tmp_path.unlink(missing_ok=True)
         return None
 
-    log.info("  [gold/%s] %d windows from %d samples (short=%d, load_err=%d) in %.1fs. Writing NPZ ...",
-             dataset_name, len(records), len(samples), skipped_short, skipped_load, time.time() - t0)
-
-    # Write NPZ
-    out_dir.mkdir(parents=True, exist_ok=True)
+    log.info("  [gold/%s] %d windows from %d samples (short=%d, load_err=%d) in %.1fs. Writing output ...",
+             dataset_name, write_idx, len(samples), skipped_short, skipped_load, time.time() - t0)
     t_write = time.time()
 
-    x = np.stack([r["x"] for r in records]).astype(np.float32)
-    activity_id_arr = np.asarray([r["activity_id"] for r in records], dtype=np.int64)
-    log.info("    [gold/%s] X shape=%s (%.1f MB)", dataset_name, x.shape, x.nbytes / 1024 / 1024)
+    # Save X from memmap (read-only, OS handles paging)
+    x_final = np.load(str(x_tmp_path), mmap_mode="r")[:write_idx]
+    log.info("    [gold/%s] X shape=%s (%.1f MB on disk)", dataset_name, x_final.shape,
+             write_idx * np.prod(window_shape) * 4 / 1024 / 1024)
+    np.save(out_dir / "x.npy", x_final)
+    del x_final
+    x_tmp_path.unlink(missing_ok=True)
 
-    np.savez_compressed(out_dir / "x.npz", X=x)
-    del x
-
+    # Save Y (lightweight, fits in RAM)
+    activity_id_arr = np.asarray([r["activity_id"] for r in meta_records], dtype=np.int64)
     np.savez_compressed(out_dir / "y.npz",
-        pose=np.stack([r["pose"] for r in records]).astype(np.float32),
-        pose_mask=np.asarray([r["pose_mask"] for r in records], dtype=np.int64),
+        pose=np.stack([r["pose"] for r in meta_records]).astype(np.float32),
+        pose_mask=np.asarray([r["pose_mask"] for r in meta_records], dtype=np.int64),
         activity=one_hot(activity_id_arr, len(label_maps["activity"])),
         activity_id=activity_id_arr,
-        activity_mask=np.asarray([r["activity_mask"] for r in records], dtype=np.int64),
-        location_id=np.asarray([r["location_id"] for r in records], dtype=np.int64),
-        location_mask=np.asarray([r["location_mask"] for r in records], dtype=np.int64),
-        environment_id=np.asarray([r["environment_id"] for r in records], dtype=np.int64),
-        environment_mask=np.asarray([r["environment_mask"] for r in records], dtype=np.int64),
-        subject_id=np.asarray([r["subject_id"] for r in records], dtype=np.int64),
-        subject_mask=np.asarray([r["subject_mask"] for r in records], dtype=np.int64),
+        activity_mask=np.asarray([r["activity_mask"] for r in meta_records], dtype=np.int64),
+        location_id=np.asarray([r["location_id"] for r in meta_records], dtype=np.int64),
+        location_mask=np.asarray([r["location_mask"] for r in meta_records], dtype=np.int64),
+        environment_id=np.asarray([r["environment_id"] for r in meta_records], dtype=np.int64),
+        environment_mask=np.asarray([r["environment_mask"] for r in meta_records], dtype=np.int64),
+        subject_id=np.asarray([r["subject_id"] for r in meta_records], dtype=np.int64),
+        subject_mask=np.asarray([r["subject_mask"] for r in meta_records], dtype=np.int64),
     )
 
     np.savez_compressed(out_dir / "metadata.npz", metadata=np.asarray([
         {"dataset": dataset_name, "sample_id": r["sample_id"], "split": r["split"], "window_start": r["window_start"]}
-        for r in records
+        for r in meta_records
     ], dtype=object))
 
     split_counts = defaultdict(int)
-    for r in records:
+    for r in meta_records:
         split_counts[r["split"]] += 1
 
     stats = {
-        "dataset": dataset_name, "num_samples": len(records),
+        "dataset": dataset_name, "num_samples": write_idx,
         "splits": dict(sorted(split_counts.items())),
-        "x_shape": [len(records)] + list(records[0]["x"].shape),
-        "pose_shape": [len(records), 13, 3],
+        "x_shape": [write_idx, *window_shape],
+        "pose_shape": [write_idx, 13, 3],
         "window_frames": window_frames, "stride": stride,
         "pose_joints": POSE_JOINTS,
     }
 
-    # Compute normalization from a subsample to avoid re-loading x.npz
-    all_means = []
-    all_stds = []
-    for r in records[:min(1000, len(records))]:
-        all_means.append(float(r["x"].mean()))
-        all_stds.append(float(r["x"].std()))
-    normalization = {"mean": float(np.mean(all_means)), "std": float(np.mean(all_stds) + 1e-6)}
+    normalization = {"mean": float(np.mean(norm_means)) if norm_means else 0.0,
+                     "std": float(np.mean(norm_stds) + 1e-6) if norm_stds else 1.0}
 
-    manifest = {**stats, "files": {"x": "x.npz", "y": "y.npz", "metadata": "metadata.npz",
+    manifest = {**stats, "files": {"x": "x.npy", "y": "y.npz", "metadata": "metadata.npz",
                                     "label_maps": "label_maps.json", "stats": "stats.json", "normalization": "normalization.json"}}
     (out_dir / "label_maps.json").write_text(json.dumps(label_maps, indent=2, sort_keys=True))
     (out_dir / "stats.json").write_text(json.dumps(stats, indent=2))
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (out_dir / "normalization.json").write_text(json.dumps(normalization, indent=2))
 
-    del records
+    del meta_records
     gc.collect()
 
     log.info("    [gold/%s] Written in %.1fs", dataset_name, time.time() - t_write)
