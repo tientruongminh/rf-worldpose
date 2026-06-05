@@ -7,6 +7,7 @@ from pathlib import Path
 from dagster import MetadataValue, asset
 
 from rfpose_pipelines.etl.bronze_to_silver import bronze_to_silver
+from rfpose_pipelines.etl.silver_unify import silver_unify
 from rfpose_pipelines.etl.silver_to_gold import parse_dataset_filter, silver_to_gold
 from rfpose_pipelines.metadata_registry import (
     build_dataset_metadata,
@@ -30,6 +31,13 @@ def _silver_dir() -> str:
 
 def _dataset_version() -> str:
     return os.getenv("RFPOSE_DATASET_VERSION", "rfpose-multitask-v1")
+
+
+def _unified_dir() -> str:
+    return os.getenv(
+        "RFPOSE_UNIFIED_DIR",
+        "/app/data/silver_unified",
+    )
 
 
 def _gold_dir() -> str:
@@ -124,26 +132,56 @@ def silver_quality_report(context, silver_csi_rows):
 
 
 @asset
-def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
-    context.log.info("[STEP 4/6] gold_multitask_dataset: silver -> gold conversion ...")
+def silver_unified_dataset(context, silver_csi_rows, silver_quality_report):
+    context.log.info("[STEP 4/7] silver_unified_dataset: flatten, pad, normalize ...")
     if not silver_quality_report["passed"]:
-        context.log.error("[gold_multitask_dataset] Silver quality check FAILED, aborting")
-        raise RuntimeError("Silver quality check failed; refusing to build gold dataset.")
+        context.log.error("[silver_unified_dataset] Silver quality check FAILED, aborting")
+        raise RuntimeError("Silver quality check failed; refusing to build unified dataset.")
+
+    silver_dir = silver_csi_rows["silver_dir"]
+    unified_dir = _unified_dir()
+    min_timesteps = int(os.getenv("RFPOSE_MIN_TIMESTEPS", "60"))
+
+    context.log.info(
+        "Starting silver_unify silver_dir=%s unified_dir=%s min_timesteps=%d",
+        silver_dir, unified_dir, min_timesteps,
+    )
+    t0 = time.time()
+    report = silver_unify(silver_dir, unified_dir, min_timesteps=min_timesteps)
+    elapsed = time.time() - t0
+    context.log.info("[silver_unified_dataset] DONE: %d samples, n_padded=%s in %.1fs",
+                     report["samples"], report.get("n_padded"), elapsed)
+    context.add_output_metadata({
+        "unified_dir": _uri_metadata(unified_dir),
+        "samples": report["samples"],
+        "n_padded": report.get("n_padded", 0),
+        "c_unified": report.get("c_unified", 2),
+        "skipped_short": report.get("skipped_short", 0),
+        "skipped_load": report.get("skipped_load", 0),
+        "datasets": MetadataValue.json(report.get("datasets", {})),
+        "status": MetadataValue.text(report.get("status", "unknown")),
+    })
+    return {"unified_dir": unified_dir, "report": report}
+
+
+@asset
+def gold_multitask_dataset(context, silver_unified_dataset):
+    context.log.info("[STEP 5/7] gold_multitask_dataset: unified -> gold conversion ...")
 
     gold_dir = _gold_dir()
-    silver_dir = silver_csi_rows["silver_dir"]
+    unified_dir = silver_unified_dataset["unified_dir"]
     datasets = parse_dataset_filter(os.getenv("RFPOSE_GOLD_DATASETS"))
     window_frames = int(os.getenv("RFPOSE_WINDOW_FRAMES", "60"))
     stride = int(os.getenv("RFPOSE_STRIDE", "10"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
 
     context.log.info(
-        "Starting silver_to_gold silver_dir=%s gold_dir=%s window=%d stride=%d",
-        silver_dir, gold_dir, window_frames, stride,
+        "Starting silver_to_gold unified_dir=%s gold_dir=%s window=%d stride=%d",
+        unified_dir, gold_dir, window_frames, stride,
     )
     t0 = time.time()
     summary = silver_to_gold(
-        silver_dir, gold_dir,
+        unified_dir, gold_dir,
         datasets=datasets, window_frames=window_frames,
         stride=stride, max_samples_per_dataset=max_samples,
     )
@@ -163,7 +201,7 @@ def gold_multitask_dataset(context, silver_csi_rows, silver_quality_report):
 
 @asset
 def gold_quality_report(context, gold_multitask_dataset):
-    context.log.info("[STEP 5/6] gold_quality_report: validating gold output ...")
+    context.log.info("[STEP 6/7] gold_quality_report: validating gold output ...")
     gold_dir_value = gold_multitask_dataset["gold_dir"]
     summary = gold_multitask_dataset["summary"]
     missing = []
@@ -217,7 +255,7 @@ def gold_quality_report(context, gold_multitask_dataset):
 
 @asset
 def dataset_registry_entry(context, bronze_dataset_roots, silver_csi_rows, gold_multitask_dataset, gold_quality_report):
-    context.log.info("[STEP 6/6] dataset_registry_entry: registering final dataset ...")
+    context.log.info("[STEP 7/7] dataset_registry_entry: registering final dataset ...")
     dataset_version = _dataset_version()
     artifact_uri = gold_multitask_dataset["gold_dir"]
     quality_report_uri = f"{artifact_uri.rstrip('/')}/summary.json"
