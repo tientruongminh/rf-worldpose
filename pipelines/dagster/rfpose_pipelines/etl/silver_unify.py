@@ -1,7 +1,12 @@
-"""Silver → Silver-Unified: flatten spatial dims, pad channels/features, normalize.
+"""Silver → Silver-Unified: compute unified metadata without copying CSI files.
 
-Input:  silver_dir with catalog.parquet + csi/<dataset>/<sample>.npy (varying shapes)
-Output: unified_dir with unified_catalog.parquet + csi/<sample>.npy (all [2, T, N_padded])
+Scans all Silver .npy shapes, determines N_padded and C_unified,
+filters short samples, computes per-sample normalization stats,
+and writes a unified_catalog.parquet. No .npy files are created —
+the Gold layer applies flatten+pad+normalize on-the-fly during windowing.
+
+Input:  silver_dir with catalog.parquet + csi/<dataset>/<sample>.npy
+Output: unified_dir with unified_catalog.parquet + quality_report.json
 """
 from __future__ import annotations
 
@@ -10,7 +15,6 @@ from pathlib import Path
 import json
 import logging
 import time
-import gc
 
 import numpy as np
 
@@ -22,7 +26,18 @@ except Exception:
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-C_UNIFIED = 2  # amplitude + phase (pad if missing)
+C_UNIFIED = 2
+
+
+def _npy_shape(path: Path) -> tuple[int, ...] | None:
+    """Read .npy shape from header without loading data."""
+    try:
+        with open(path, "rb") as f:
+            version = np.lib.format.read_magic(f)
+            shape, _, _ = np.lib.format._read_array_header(f, version)
+            return shape
+    except Exception:
+        return None
 
 
 def load_catalog(silver_dir: Path) -> list[dict]:
@@ -36,41 +51,8 @@ def load_catalog(silver_dir: Path) -> list[dict]:
     raise FileNotFoundError(f"No catalog in {silver_dir}")
 
 
-def compute_n_flat(shape: list[int]) -> int:
-    """Given CSI shape [C, T, ...spatial...], compute flat spatial dim N = product of dims[2:]."""
+def compute_n_flat(shape: list[int] | tuple[int, ...]) -> int:
     return int(np.prod(shape[2:]))
-
-
-def flatten_and_pad(csi: np.ndarray, n_padded: int) -> np.ndarray:
-    """Flatten spatial dims and pad channels to C_UNIFIED, features to n_padded.
-    
-    Input:  [C, T, ...] where C in {1, 2}
-    Output: [2, T, n_padded] float32
-    """
-    C, T = csi.shape[0], csi.shape[1]
-    N = int(np.prod(csi.shape[2:]))
-    flat = csi.reshape(C, T, N).astype(np.float32)
-
-    out = np.zeros((C_UNIFIED, T, n_padded), dtype=np.float32)
-    c_copy = min(C, C_UNIFIED)
-    n_copy = min(N, n_padded)
-    out[:c_copy, :, :n_copy] = flat[:c_copy, :, :n_copy]
-    return out
-
-
-def normalize_sample(x: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """Z-score normalize per sample. Returns (normalized, mean, std)."""
-    amp = x[0]  # first channel = amplitude
-    mean = float(amp.mean())
-    std = float(amp.std() + 1e-8)
-    x_norm = x.copy()
-    x_norm[0] = (amp - mean) / std
-    if x.shape[0] > 1:
-        phase = x[1]
-        p_mean = float(phase.mean())
-        p_std = float(phase.std() + 1e-8)
-        x_norm[1] = (phase - p_mean) / p_std
-    return x_norm, mean, std
 
 
 def silver_unify(
@@ -83,7 +65,6 @@ def silver_unify(
     silver_dir = Path(silver_dir)
     unified_dir = Path(unified_dir)
 
-    # Idempotent
     report_path = unified_dir / "quality_report.json"
     if not force and report_path.exists():
         try:
@@ -94,95 +75,110 @@ def silver_unify(
         except Exception:
             pass
 
-    log.info("START silver_unify: %s -> %s (min_timesteps=%d)", silver_dir, unified_dir, min_timesteps)
+    log.info("START silver_unify: %s -> %s (min_timesteps=%d, catalog-only mode)",
+             silver_dir, unified_dir, min_timesteps)
     t0 = time.time()
 
     catalog = load_catalog(silver_dir)
     log.info("  Loaded %d samples from catalog", len(catalog))
 
-    # Pass 1: compute N_max from csi_shape
+    # Pass 1: compute N_max + filter
     n_values = []
-    for row in catalog:
-        shape = json.loads(row["csi_shape"]) if isinstance(row["csi_shape"], str) else row["csi_shape"]
-        n_flat = compute_n_flat(shape)
-        n_values.append(n_flat)
-    n_padded = max(n_values)
-    log.info("  N_flat values: min=%d, max=%d, n_padded=%d", min(n_values), max(n_values), n_padded)
-
-    # Pass 2: flatten, pad, normalize, save
-    unified_dir.mkdir(parents=True, exist_ok=True)
-    csi_out_dir = unified_dir / "csi"
-    csi_out_dir.mkdir(exist_ok=True)
-
-    unified_rows = []
-    dataset_counts = Counter()
+    valid_indices = []
     skipped_short = 0
-    skipped_load = 0
-    total = len(catalog)
+    skipped_missing = 0
 
     for idx, row in enumerate(catalog):
-        shape = json.loads(row["csi_shape"]) if isinstance(row["csi_shape"], str) else row["csi_shape"]
-        T = shape[1]
+        shape_raw = row.get("csi_shape")
+        if shape_raw is None:
+            skipped_missing += 1
+            continue
+        shape = json.loads(shape_raw) if isinstance(shape_raw, str) else list(shape_raw)
+        T = shape[1] if len(shape) > 1 else 0
 
         if T < min_timesteps:
             skipped_short += 1
             continue
 
         csi_path = silver_dir / row["csi_path"]
+        if not csi_path.exists():
+            skipped_missing += 1
+            continue
+
+        n_flat = compute_n_flat(shape)
+        n_values.append(n_flat)
+        valid_indices.append(idx)
+
+    if not n_values:
+        unified_dir.mkdir(parents=True, exist_ok=True)
+        report = {"samples": 0, "status": "empty", "skipped": False,
+                  "skipped_short": skipped_short, "skipped_missing": skipped_missing}
+        report_path.write_text(json.dumps(report, indent=2))
+        return report
+
+    n_padded = max(n_values)
+    log.info("  N_flat: min=%d, max=%d, n_padded=%d | valid=%d, short=%d, missing=%d (%.1fs)",
+             min(n_values), max(n_values), n_padded,
+             len(valid_indices), skipped_short, skipped_missing, time.time() - t0)
+
+    # Pass 2: build unified catalog rows (metadata only, no file copies)
+    unified_rows = []
+    dataset_counts = Counter()
+    skipped_load = 0
+    total = len(valid_indices)
+
+    for progress_idx, cat_idx in enumerate(valid_indices):
+        row = catalog[cat_idx]
+        shape = json.loads(row["csi_shape"]) if isinstance(row["csi_shape"], str) else list(row["csi_shape"])
+        n_flat = compute_n_flat(shape)
+        ds = row.get("dataset", "unknown")
+
+        # Compute normalization stats from a quick header+partial read
+        csi_path = silver_dir / row["csi_path"]
         try:
             csi = np.load(csi_path, mmap_mode="r")
-            csi_data = csi[:].astype(np.float32)
-            del csi
-        except Exception as e:
+            # Sample a small portion for normalization stats
+            C = csi.shape[0]
+            T = csi.shape[1]
+            # Read at most 100 timesteps for stats
+            t_sample = min(T, 100)
+            chunk = csi[:, :t_sample].astype(np.float32)
+            amp_mean = float(chunk[0].mean())
+            amp_std = float(chunk[0].std() + 1e-8)
+            del chunk, csi
+        except Exception:
             skipped_load += 1
             continue
 
-        # Flatten + pad
-        unified = flatten_and_pad(csi_data, n_padded)
-        del csi_data
-
-        # Normalize
-        unified, amp_mean, amp_std = normalize_sample(unified)
-
-        # Save
-        ds = row.get("dataset", "unknown")
-        sid = row.get("sample_id", f"s{idx}")
-        # Use unique filename: dataset_sampleid
-        safe_name = f"{ds}_{sid}".replace("/", "_").replace("\\", "_").replace(" ", "_")
-        out_path = csi_out_dir / f"{safe_name}.npy"
-
-        if not out_path.exists():
-            np.save(out_path, unified)
-        del unified
-
-        # Build unified catalog row
         new_row = dict(row)
-        new_row["csi_path"] = str(out_path.relative_to(unified_dir))
-        new_row["csi_shape"] = json.dumps([C_UNIFIED, T, n_padded])
-        new_row["n_flat"] = compute_n_flat(shape)
+        # Keep original csi_path (pointing to silver), add unified metadata
+        new_row["original_csi_path"] = row["csi_path"]
+        new_row["n_flat"] = n_flat
         new_row["n_padded"] = n_padded
+        new_row["c_unified"] = C_UNIFIED
         new_row["amp_mean"] = amp_mean
         new_row["amp_std"] = amp_std
         unified_rows.append(new_row)
         dataset_counts[ds] += 1
 
-        if (idx + 1) % 5000 == 0 or idx + 1 == total:
-            log.info("  [%d/%d %.0f%%] %d unified, %d short-skip, %d load-err (%.1fs)",
-                     idx + 1, total, (idx + 1) / total * 100,
-                     len(unified_rows), skipped_short, skipped_load, time.time() - t0)
+        if (progress_idx + 1) % 10000 == 0 or progress_idx + 1 == total:
+            log.info("  [%d/%d %.0f%%] %d unified, %d load-err (%.1fs)",
+                     progress_idx + 1, total, (progress_idx + 1) / total * 100,
+                     len(unified_rows), skipped_load, time.time() - t0)
 
-    log.info("  Total: %d unified samples, %d short-skipped, %d load-errors",
-             len(unified_rows), skipped_short, skipped_load)
+    log.info("  Total: %d unified, %d short-skipped, %d missing, %d load-errors",
+             len(unified_rows), skipped_short, skipped_missing, skipped_load)
 
     # Write unified catalog
+    unified_dir.mkdir(parents=True, exist_ok=True)
+
     if pl is not None and unified_rows:
-        # Ensure consistent types
         _str_cols = ["dataset", "sample_id", "source_file", "split", "activity",
                      "subject", "environment", "location", "subject_key",
                      "environment_key", "location_key", "csi_path", "csi_shape",
-                     "antenna_layout", "pose"]
+                     "antenna_layout", "pose", "original_csi_path"]
         _int_cols = ["activity_id", "num_users", "n_tx", "n_rx", "n_antennas",
-                     "n_subcarriers", "n_timesteps", "pose_dim", "n_flat", "n_padded"]
+                     "n_subcarriers", "n_timesteps", "pose_dim", "n_flat", "n_padded", "c_unified"]
         for r in unified_rows:
             for col in _str_cols:
                 if col in r and r[col] is None:
@@ -209,15 +205,17 @@ def silver_unify(
         "c_unified": C_UNIFIED,
         "min_timesteps": min_timesteps,
         "skipped_short": skipped_short,
+        "skipped_missing": skipped_missing,
         "skipped_load": skipped_load,
         "status": "ok" if unified_rows else "empty",
-        "schema_version": "silver_unified_v1",
+        "schema_version": "silver_unified_v2_catalog_only",
+        "silver_dir": str(silver_dir),
         "unified_dir": str(unified_dir),
         "skipped": False,
     }
     report_path.write_text(json.dumps(report, indent=2))
 
     elapsed = time.time() - t0
-    log.info("DONE silver_unify: %d samples, n_padded=%d in %.1fs", len(unified_rows), n_padded, elapsed)
-    gc.collect()
+    log.info("DONE silver_unify: %d samples, n_padded=%d in %.1fs (catalog-only, no CSI copies)",
+             len(unified_rows), n_padded, elapsed)
     return report

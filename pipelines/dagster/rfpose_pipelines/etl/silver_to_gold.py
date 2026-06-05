@@ -1,8 +1,9 @@
-"""Silver-Unified → Gold ETL: read unified catalog + .npy CSI files, cut windows, write NPZ.
+"""Silver-Unified → Gold ETL: read unified catalog, load CSI from Silver,
+flatten+pad+normalize on-the-fly, cut windows, write per-dataset NPZ.
 
-Reads from the Silver-Unified layer where all CSI shapes are already [2, T, N_padded].
-Processes ONE dataset at a time to avoid OOM. Auto-adjusts stride for samples
-with many timesteps to cap windows per sample.
+The unified catalog (catalog-only mode) provides n_padded and normalization
+stats. CSI files are read from the original Silver directory and transformed
+during windowing. Processes ONE dataset at a time to avoid OOM.
 """
 from __future__ import annotations
 
@@ -179,6 +180,24 @@ def make_windows(csi: np.ndarray, window_frames: int, stride: int) -> list[tuple
 # Process one dataset at a time
 # ---------------------------------------------------------------------------
 
+def flatten_pad_normalize(csi: np.ndarray, n_padded: int, c_unified: int = 2) -> np.ndarray:
+    """Flatten spatial dims, pad C and N, z-score normalize. [C,T,...] -> [c_unified,T,n_padded]."""
+    C, T = csi.shape[0], csi.shape[1]
+    N = int(np.prod(csi.shape[2:]))
+    flat = csi.reshape(C, T, N).astype(np.float32)
+
+    out = np.zeros((c_unified, T, n_padded), dtype=np.float32)
+    c_copy = min(C, c_unified)
+    n_copy = min(N, n_padded)
+    out[:c_copy, :, :n_copy] = flat[:c_copy, :, :n_copy]
+
+    for ch in range(min(c_copy, c_unified)):
+        mean = float(out[ch].mean())
+        std = float(out[ch].std() + 1e-8)
+        out[ch] = (out[ch] - mean) / std
+    return out
+
+
 def process_one_dataset(
     dataset_name: str,
     samples: list[dict],
@@ -188,9 +207,11 @@ def process_one_dataset(
     *,
     window_frames: int,
     stride: int,
+    n_padded: int,
+    c_unified: int = 2,
 ) -> dict | None:
-    """Process a single dataset: load CSI, cut windows, write NPZ. Returns stats or None."""
-    log.info("  [gold/%s] Processing %d samples ...", dataset_name, len(samples))
+    """Process a single dataset: load CSI, flatten+pad+normalize, cut windows, write NPZ."""
+    log.info("  [gold/%s] Processing %d samples (n_padded=%d) ...", dataset_name, len(samples), n_padded)
     t0 = time.time()
 
     records = []
@@ -199,18 +220,23 @@ def process_one_dataset(
 
     for idx, row in enumerate(samples):
         sample_id = row["sample_id"]
-        csi_path = silver_dir / row["csi_path"]
+        csi_rel = row.get("original_csi_path") or row.get("csi_path")
+        csi_path = silver_dir / csi_rel
 
         try:
             csi = np.load(csi_path, mmap_mode="r")
-            csi_float = csi[:].astype(np.float32)
+            csi_data = csi[:]
             del csi
         except Exception as e:
             skipped_load += 1
             continue
 
-        windows = make_windows(csi_float, window_frames, stride)
-        del csi_float
+        # Flatten, pad, normalize on-the-fly
+        csi_unified = flatten_pad_normalize(csi_data, n_padded, c_unified)
+        del csi_data
+
+        windows = make_windows(csi_unified, window_frames, stride)
+        del csi_unified
         if not windows:
             skipped_short += 1
             continue
@@ -333,9 +359,10 @@ def process_one_dataset(
 # ---------------------------------------------------------------------------
 
 def silver_to_gold(
-    silver_dir: str | Path,
+    unified_dir: str | Path,
     gold_dir: str | Path,
     *,
+    silver_dir: str | Path | None = None,
     datasets: set[str] | None = None,
     window_frames: int = 60,
     stride: int = 10,
@@ -353,12 +380,35 @@ def silver_to_gold(
             except Exception:
                 pass
 
-    log.info("START silver_to_gold: silver=%s -> gold=%s (window=%d, stride=%d, max_win/sample=%d)",
-             silver_dir, gold_dir, window_frames, stride, MAX_WINDOWS_PER_SAMPLE)
+    log.info("START silver_to_gold: unified=%s -> gold=%s (window=%d, stride=%d, max_win/sample=%d)",
+             unified_dir, gold_dir, window_frames, stride, MAX_WINDOWS_PER_SAMPLE)
     t0 = time.time()
 
-    silver_dir = Path(silver_dir)
-    catalog = load_catalog(silver_dir)
+    unified_dir = Path(unified_dir)
+    catalog = load_catalog(unified_dir)
+
+    # Determine silver_dir for loading original .npy files
+    if silver_dir is not None:
+        actual_silver_dir = Path(silver_dir)
+    else:
+        report_path = unified_dir / "quality_report.json"
+        if report_path.exists():
+            report = json.loads(report_path.read_text())
+            actual_silver_dir = Path(report.get("silver_dir", str(unified_dir)))
+        else:
+            actual_silver_dir = unified_dir
+    log.info("  Silver CSI dir: %s", actual_silver_dir)
+
+    # Get n_padded from catalog
+    n_padded_values = set()
+    for row in catalog:
+        np_val = row.get("n_padded")
+        if np_val is not None and np_val > 0:
+            n_padded_values.add(int(np_val))
+    n_padded = max(n_padded_values) if n_padded_values else None
+    c_unified = 2
+    if n_padded:
+        log.info("  Using n_padded=%d, c_unified=%d from unified catalog", n_padded, c_unified)
 
     # Filter
     if datasets:
@@ -386,9 +436,10 @@ def silver_to_gold(
         with tempfile.TemporaryDirectory(prefix="rfpose-gold-") as tmpdir:
             local_gold = Path(tmpdir) / "gold"
             summary = silver_to_gold(
-                silver_dir, local_gold,
-                datasets=datasets, window_frames=window_frames,
-                stride=stride, max_samples_per_dataset=max_samples_per_dataset,
+                unified_dir, local_gold,
+                silver_dir=silver_dir, datasets=datasets,
+                window_frames=window_frames, stride=stride,
+                max_samples_per_dataset=max_samples_per_dataset,
             )
             upload_report = upload_s3_directory(local_gold, gold_dir)
             summary["upload"] = upload_report
@@ -408,8 +459,9 @@ def silver_to_gold(
         log.info("[%d/%d] Dataset '%s': %d samples", ds_idx, total_ds, dataset_name, len(samples))
         dataset_out = out / dataset_name
         stats = process_one_dataset(
-            dataset_name, samples, silver_dir, dataset_out, label_maps,
+            dataset_name, samples, actual_silver_dir, dataset_out, label_maps,
             window_frames=window_frames, stride=stride,
+            n_padded=n_padded, c_unified=c_unified,
         )
         if stats:
             stats_by_dataset[dataset_name] = stats
@@ -438,15 +490,17 @@ def silver_to_gold(
 if __name__ == "__main__":
     logging.basicConfig(level=os.getenv("RFPOSE_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--silver-dir", required=True)
+    parser.add_argument("--unified-dir", required=True, help="Dir with unified catalog")
     parser.add_argument("--gold-dir", required=True)
+    parser.add_argument("--silver-dir", default=None, help="Dir with original .npy files (defaults to quality_report.silver_dir)")
     parser.add_argument("--datasets", default=os.getenv("RFPOSE_GOLD_DATASETS"))
     parser.add_argument("--window-frames", type=int, default=60)
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--max-samples-per-dataset", type=int, default=None)
     args = parser.parse_args()
     print(json.dumps(silver_to_gold(
-        args.silver_dir, args.gold_dir,
+        args.unified_dir, args.gold_dir,
+        silver_dir=args.silver_dir,
         datasets=parse_dataset_filter(args.datasets),
         window_frames=args.window_frames, stride=args.stride,
         max_samples_per_dataset=args.max_samples_per_dataset,

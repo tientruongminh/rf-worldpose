@@ -165,25 +165,27 @@ def silver_unified_dataset(context, silver_csi_rows, silver_quality_report):
 
 
 @asset
-def gold_multitask_dataset(context, silver_unified_dataset):
+def gold_multitask_dataset(context, silver_csi_rows, silver_unified_dataset):
     context.log.info("[STEP 5/7] gold_multitask_dataset: unified -> gold conversion ...")
 
     gold_dir = _gold_dir()
     unified_dir = silver_unified_dataset["unified_dir"]
+    silver_dir = silver_csi_rows["silver_dir"]
     datasets = parse_dataset_filter(os.getenv("RFPOSE_GOLD_DATASETS"))
     window_frames = int(os.getenv("RFPOSE_WINDOW_FRAMES", "60"))
     stride = int(os.getenv("RFPOSE_STRIDE", "10"))
     max_samples = _optional_int_env("RFPOSE_MAX_SAMPLES_PER_DATASET")
 
     context.log.info(
-        "Starting silver_to_gold unified_dir=%s gold_dir=%s window=%d stride=%d",
-        unified_dir, gold_dir, window_frames, stride,
+        "Starting silver_to_gold unified_dir=%s silver_dir=%s gold_dir=%s window=%d stride=%d",
+        unified_dir, silver_dir, gold_dir, window_frames, stride,
     )
     t0 = time.time()
     summary = silver_to_gold(
         unified_dir, gold_dir,
-        datasets=datasets, window_frames=window_frames,
-        stride=stride, max_samples_per_dataset=max_samples,
+        silver_dir=silver_dir, datasets=datasets,
+        window_frames=window_frames, stride=stride,
+        max_samples_per_dataset=max_samples,
     )
     elapsed = time.time() - t0
     context.log.info("[gold_multitask_dataset] DONE: %d windows across %d datasets in %.1fs",
