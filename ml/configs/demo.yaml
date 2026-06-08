@@ -1,0 +1,37 @@
+# Demo config — minimal training to verify full pipeline end-to-end
+# ~5 min: submit → Eagle → train 2 epochs → MLflow metrics + checkpoint
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: ["uthar"]
+  val_ratio: 0.3
+
+model:
+  d_model: 64
+  spatial_heads: 4
+  temporal_heads: 4
+  n_spatial_layers: 1
+  n_temporal_layers: 1
+  n_decoder_layers: 1
+  n_decoder_temporal_layers: 1
+  num_actions: 13
+
+training:
+  device: "cuda"
+  epochs: 2
+  batch_size: 16
+  lr: 3.0e-4
+  warmup_epochs: 1
+  patience: 5
+  save_every: 1
+  log_every: 10
+  amp: true
+  num_workers: 2
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "demo"

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: rfpose-pipelines
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: dagster
+Requires-Dist: dagster-webserver
+Requires-Dist: polars
+Requires-Dist: pyarrow
+Requires-Dist: pydantic
+Requires-Dist: pandera
+Requires-Dist: boto3

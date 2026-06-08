@@ -1,0 +1,51 @@
+# SSL Pretraining on Eagle — full CSI from Gold unified v2 (219k windows)
+defaults:
+  - ssl_pretrain
+
+data:
+  format: "gold_npz"
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: null
+  n_subcarriers: 270
+  window_size: 60
+  val_ratio: 0.1
+
+model:
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  ffn_mult: 4
+  patch_size: 6
+  dropout: 0.1
+
+ssl:
+  mask_ratio: 0.4
+  lambda_recon: 1.0
+  lambda_contrast: 0.5
+  temperature: 0.07
+  proj_dim: 128
+
+training:
+  device: "cuda"
+  epochs: 30
+  batch_size: 64
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 2
+  grad_clip: 1.0
+  save_every: 5
+  log_every: 50
+  amp: true
+  num_workers: 4
+  seed: 42
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-ssl"
+  run_name: "ssl-pretrain-gold-v2"
+  log_batch_metrics: true
+  log_checkpoints: true
+  log_every: 50
