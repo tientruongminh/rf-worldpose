@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Model Registry{% endblock %}
+
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+  <div>
+    <h2 style="font-size:1.5rem; font-weight:700;">Model Registry</h2>
+    <p class="text-sm text-muted mt-2">Manage trained models. Promote the best to Production, then deploy to VPS for inference.</p>
+  </div>
+</div>
+
+{% if message %}
+<div class="flash flash-{{ message_type or 'success' }}">{{ message }}</div>
+{% endif %}
+
+{% if active_model %}
+<div class="card mb-4" style="border-color:var(--c-green);">
+  <div class="flex justify-between items-center">
+    <div>
+      <span class="badge badge-completed">PRODUCTION</span>
+      <strong style="margin-left:0.5rem;">{{ active_model.name }}</strong>
+      <span class="text-sm text-muted" style="margin-left:0.5rem;">{{ active_model.id }}</span>
+    </div>
+    <div class="flex gap-2">
+      {% if active_model.deployed %}
+      <span class="badge badge-running">DEPLOYED</span>
+      {% else %}
+      <form method="POST" action="/models/{{ active_model.id }}/deploy" style="margin:0;">
+        <button type="submit" class="btn btn-primary btn-sm">Deploy to VPS</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  <div class="detail-grid mt-4" style="grid-template-columns:120px 1fr;">
+    <dt>Dataset</dt><dd>{{ active_model.dataset_version or '—' }}</dd>
+    <dt>Job</dt><dd>{{ active_model.training_job_id or '—' }}</dd>
+    <dt>Artifact</dt><dd style="word-break:break-all;">{{ active_model.artifact_uri or '—' }}</dd>
+    {% if active_model.metrics %}
+    <dt>Metrics</dt><dd>{{ active_model.metrics }}</dd>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<div class="card" style="padding:0; overflow:hidden;">
+  <div style="padding:1rem 1.5rem; border-bottom:1px solid var(--c-border);">
+    <span class="text-sm text-muted">{{ models | length }} model(s) registered</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Model ID</th>
+        <th>Name</th>
+        <th>Dataset</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in models %}
+      <tr>
+        <td class="text-sm">{{ m.id }}</td>
+        <td><strong>{{ m.name }}</strong></td>
+        <td class="text-sm">{{ m.dataset_version or '—' }}</td>
+        <td>
+          {% if m.status == 'production' %}
+          <span class="badge badge-completed">production</span>
+          {% elif m.status == 'staging' %}
+          <span class="badge badge-submitted">staging</span>
+          {% elif m.status == 'archived' %}
+          <span class="badge badge-cancelled">archived</span>
+          {% else %}
+          <span class="badge badge-created">{{ m.status }}</span>
+          {% endif %}
+        </td>
+        <td class="text-sm text-muted">{{ m.created_at.strftime('%m/%d %H:%M') if m.created_at else '—' }}</td>
+        <td>
+          <div class="flex gap-2">
+            {% if m.status != 'production' %}
+            <form method="POST" action="/models/{{ m.id }}/promote" style="margin:0;">
+              <button type="submit" class="btn btn-primary btn-sm"
+                      onclick="return confirm('Promote {{ m.id }} to Production? Current production model will be archived.')">
+                Promote
+              </button>
+            </form>
+            {% endif %}
+            {% if m.status == 'production' %}
+            <form method="POST" action="/models/{{ m.id }}/deploy" style="margin:0;">
+              <button type="submit" class="btn btn-ghost btn-sm">Deploy</button>
+            </form>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not models %}
+      <tr>
+        <td colspan="6" style="text-align:center; padding:2rem; color:var(--c-muted);">
+          No models registered yet. Complete a training job first.
+        </td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

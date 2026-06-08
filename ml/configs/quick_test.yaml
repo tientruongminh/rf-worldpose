@@ -1,0 +1,36 @@
+# Quick test config — ~10 min sample training to validate workflow
+# Uses only uthar dataset (smallest, 49k windows) with small model
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: ["uthar"]
+  val_ratio: 0.2
+
+model:
+  d_model: 128
+  spatial_heads: 4
+  temporal_heads: 4
+  n_spatial_layers: 2
+  n_temporal_layers: 2
+  n_decoder_layers: 2
+  n_decoder_temporal_layers: 1
+
+training:
+  device: "cuda"
+  epochs: 3
+  batch_size: 64
+  lr: 3.0e-4
+  warmup_epochs: 1
+  patience: 5
+  save_every: 1
+  log_every: 20
+  amp: true
+  num_workers: 4
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "quick-test"

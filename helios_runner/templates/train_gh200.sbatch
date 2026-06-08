@@ -1,24 +1,24 @@
-#!/bin/bash
+#!/bin/bash -l
 #SBATCH --job-name=rfpose-train
 #SBATCH --partition={{ partition }}
 #SBATCH --account={{ account }}
 #SBATCH --time={{ time_limit | default("24:00:00") }}
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=72
-#SBATCH --mem=480G
+#SBATCH --gres=gpu:h100:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
 
+echo "===== RF-WorldPose Training ====="
 echo "SLURM_JOB_ID=$SLURM_JOB_ID"
 echo "HOST=$(hostname)"
-echo "ARCH=$(uname -m)"
 date
 
 module purge
-# TODO: module load proper aarch64/Rocky9 CUDA/PyTorch stack on GH200 compute node.
+module load Python/3.11 CUDA/12.2
 
 export RUN_ID="${RUN_ID:-rfpose-${SLURM_JOB_ID}}"
 export DATASET_VERSION="{{ dataset_version }}"
@@ -31,10 +31,43 @@ WORKDIR="${SCRATCH:-$PWD}/rfpose/runs/${RUN_ID}"
 mkdir -p "$WORKDIR" logs
 cd "$WORKDIR"
 
+# Clone repo and checkout branch
+if [ ! -d "repo" ]; then
+    git clone --depth 1 --branch {{ git_branch }} {{ git_repo }} repo
+else
+    cd repo && git pull origin {{ git_branch }} && cd ..
+fi
+
+# Setup venv
+if [ ! -d "venv" ]; then
+    python -m venv venv
+fi
+source venv/bin/activate
+pip install --quiet --upgrade pip
+pip install --quiet -e repo/ 2>/dev/null || true
+
+# Sync dataset from S3
 aws s3 sync "s3://${S3_BUCKET}/gold/${DATASET_VERSION}/" ./dataset/ --endpoint-url "$S3_ENDPOINT_URL"
 
-python -m rfpose.training.train --dataset ./dataset --output ./outputs --epochs ${EPOCHS:-50} --batch-size ${BATCH_SIZE:-128}
+echo "===== Starting training: {{ script_path }} ====="
 
-python -m rfpose.evaluation.eval --checkpoint ./outputs/best.pt --dataset ./dataset --output ./outputs/eval_report.json
-python -m rfpose.export.onnx --checkpoint ./outputs/best.pt --output ./outputs/model.onnx
+# Parse hyperparams as env vars
+{{ train_config }}
+
+# Run training script
+python "repo/{{ script_path }}" \
+    --dataset ./dataset \
+    --output ./outputs \
+    --run-id "$RUN_ID"
+
+# Eval + export
+if [ -f "./outputs/best.pt" ]; then
+    python -m rfpose.evaluation.eval --checkpoint ./outputs/best.pt --dataset ./dataset --output ./outputs/eval_report.json 2>/dev/null || true
+    python -m rfpose.export.onnx --checkpoint ./outputs/best.pt --output ./outputs/model.onnx 2>/dev/null || true
+fi
+
+# Upload results
 aws s3 sync ./outputs "s3://${S3_BUCKET}/models/${RUN_ID}/" --endpoint-url "$S3_ENDPOINT_URL"
+
+echo "===== Training complete ====="
+date

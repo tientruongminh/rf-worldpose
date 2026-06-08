@@ -1,0 +1,76 @@
+# Phase 3: Fine-tune on custom room data (self-captured ESP32 CSI)
+#
+# Pipeline:
+#   Phase 1: ssl_pretrain.yaml  → csi_encoder_pretrained.pt  (SSL embedding)
+#   Phase 2: transformer_gold.yaml → best.pt  (multi-task pose+action on public datasets)
+#   Phase 3: finetune_room.yaml → room_best.pt  (adapt to your room)
+#
+# Usage:
+#   python -m rfpose.training.transformer_train --config-name finetune_room
+#   python -m rfpose.training.transformer_train --config-name finetune_room \
+#     training.pretrained_from=checkpoints/best.pt \
+#     data.gold_dir=/app/data/gold/my-room-v1
+
+data:
+  format: "gold_npz"
+  gold_dir: "/app/data/gold/room-captured-v1"
+  n_subcarriers: 270
+  n_joints: 13
+  n_nodes: 1
+  window_size: 60
+  stride: 10
+  val_ratio: 0.2
+  augment: true
+  require_pose: false
+  datasets: null
+
+model:
+  patch_size: 6
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  ffn_mult: 4
+  predict_3d: true
+  causal_temporal: false
+  dropout: 0.05              # lower dropout for small dataset
+  num_actions: 13
+
+loss:
+  lambda_coord: 1.0
+  lambda_vis: 0.5
+  lambda_bone: 0.3
+  lambda_temporal: 0.2
+  lambda_symmetry: 0.1
+  lambda_action: 0.3
+  coord_loss_type: "smooth_l1"
+
+training:
+  epochs: 30                  # fewer epochs for fine-tuning
+  batch_size: 16              # smaller batch for small dataset
+  lr: 1.0e-5                  # 10x lower LR than Phase 2
+  weight_decay: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  grad_clip: 1.0
+  warmup_epochs: 1
+  patience: 10
+  save_every: 5
+  log_every: 20
+  amp: true
+  num_workers: 4
+  seed: 42
+  device: "cuda"
+  resume_from: ""
+  ssl_pretrained: ""
+  pretrained_from: "checkpoints/best.pt"   # Phase 2 checkpoint
+  freeze_encoder: true                      # freeze encoder, train decoder+heads only
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "rf-worldpose-room"
+  run_name: "finetune-room-v1"

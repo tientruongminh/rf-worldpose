@@ -2,12 +2,18 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 node_modules/
 dist/
 build/
 target/
 .DS_Store
 artifacts/
+checkpoints/
+*.egg-info/
+.pip-cache/
+.tmp/
+.cache/
 data/bronze/**
 data/silver/**
 data/gold/**
@@ -15,6 +21,10 @@ data/gold/**
 !data/silver/.gitkeep
 !data/gold/.gitkeep
 *.log
+
+# VPS deploy scripts (contain credentials)
+scripts/vps_*.py
+scripts/setup_server.py
 
 # Next.js dashboard
 .next/

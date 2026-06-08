@@ -43,7 +43,8 @@ class TrainingJobCreate(BaseModel):
     id: str
     dataset_version: str
     train_config: str
-    backend: str = "helios-slurm"
+    backend: str = "eagle-slurm"
+    submitted_by: str | None = None
 
 class TrainingJobOut(TrainingJobCreate):
     status: str

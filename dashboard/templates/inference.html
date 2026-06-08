@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Live Inference{% endblock %}
+
+{% block content %}
+<h2 style="font-size:1.5rem; font-weight:700; margin-bottom:1.5rem;">Live Inference</h2>
+
+<div class="grid-2 gap-4">
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Model Status</h3>
+    <div id="model-status">
+      <p class="text-muted">Loading...</p>
+    </div>
+    <div class="flex gap-2 mt-4">
+      <button class="btn btn-ghost btn-sm" onclick="checkStatus()">Check Status</button>
+      <button class="btn btn-ghost btn-sm" onclick="reloadModel()">Reload Model</button>
+      <button class="btn btn-ghost btn-sm" onclick="recentPreds()">Recent Predictions</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Send Test CSI</h3>
+    <p class="text-sm text-muted mb-4">Paste CSI data (JSON array) or use random sample.</p>
+    <textarea id="csi-input" rows="5" placeholder='[[[[0.1, 0.2, ...]]]]'
+              style="font-size:0.8rem; font-family:monospace;"></textarea>
+    <div class="flex gap-2 mt-4">
+      <button class="btn btn-primary" onclick="predict()">Run Prediction</button>
+      <button class="btn btn-ghost" onclick="randomCSI()">Generate Random CSI</button>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-4" id="result-card" style="display:none;">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Prediction Result</h3>
+  <div id="prediction-result"></div>
+</div>
+
+<script>
+const INFER_BASE = window.location.protocol + '//' + window.location.hostname + ':8081';
+
+async function checkStatus() {
+  const el = document.getElementById('model-status');
+  try {
+    const res = await fetch(INFER_BASE + '/status');
+    const data = await res.json();
+    let html = '<dl class="detail-grid">';
+    html += `<dt>Model exists</dt><dd>${data.model_exists ? 'Yes' : 'No'}</dd>`;
+    html += `<dt>Model loaded</dt><dd>${data.model_loaded ? 'Yes' : 'No'}</dd>`;
+    html += `<dt>NATS</dt><dd>${data.nats_connected ? 'Connected' : 'Disconnected'}</dd>`;
+    html += `<dt>Deployment</dt><dd>${data.deployment_id}</dd>`;
+    html += `<dt>Packets</dt><dd>${data.stats?.packets_received || 0}</dd>`;
+    html += `<dt>Inferences</dt><dd>${data.stats?.inferences_run || 0}</dd>`;
+    if (data.input_shapes) html += `<dt>Input shape</dt><dd>${JSON.stringify(data.input_shapes)}</dd>`;
+    if (data.output_names) html += `<dt>Outputs</dt><dd>${data.output_names.join(', ')}</dd>`;
+    html += `<dt>Available</dt><dd>${(data.available_models || []).join(', ') || 'none'}</dd>`;
+    const nodes = data.buffer_nodes || {};
+    if (Object.keys(nodes).length > 0) {
+      html += `<dt>Buffered</dt><dd>${Object.entries(nodes).map(([n,c]) => 'node-'+n+':'+c).join(', ')}</dd>`;
+    }
+    html += '</dl>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<p style="color:var(--c-red);">Cannot reach inference service at ${INFER_BASE}.<br>Is the container running?</p>`;
+  }
+}
+
+async function reloadModel() {
+  try {
+    const res = await fetch(INFER_BASE + '/reload', {method:'POST'});
+    const data = await res.json();
+    alert(data.status || data.detail || 'done');
+    checkStatus();
+  } catch(e) {
+    alert('Reload failed: ' + e.message);
+  }
+}
+
+function randomCSI() {
+  const csi = [];
+  for (let n = 0; n < 9; n++) {
+    const node = [];
+    for (let t = 0; t < 30; t++) {
+      const sub = [];
+      for (let s = 0; s < 30; s++) {
+        const ch = [];
+        for (let c = 0; c < 5; c++) ch.push(+(Math.random() * 2 - 1).toFixed(4));
+        sub.push(ch);
+      }
+      node.push(sub);
+    }
+    csi.push(node);
+  }
+  document.getElementById('csi-input').value = JSON.stringify(csi);
+}
+
+async function predict() {
+  const input = document.getElementById('csi-input').value.trim();
+  if (!input) { alert('Please paste CSI data or generate random sample.'); return; }
+  const card = document.getElementById('result-card');
+  const el = document.getElementById('prediction-result');
+  card.style.display = 'block';
+  el.innerHTML = '<p class="text-muted">Running inference...</p>';
+
+  try {
+    const csi = JSON.parse(input);
+    const res = await fetch(INFER_BASE + '/predict', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({csi: csi}),
+    });
+    const data = await res.json();
+    if (!res.ok) { el.innerHTML = `<p style="color:var(--c-red);">${data.detail}</p>`; return; }
+
+    let html = '<dl class="detail-grid">';
+    if (data.action_id !== null) html += `<dt>Action ID</dt><dd style="font-size:1.5rem;font-weight:700;color:var(--c-accent);">${data.action_id}</dd>`;
+    if (data.confidence !== null) html += `<dt>Confidence</dt><dd>${(data.confidence * 100).toFixed(1)}%</dd>`;
+    html += `<dt>Model</dt><dd>${data.model_file}</dd>`;
+    html += '</dl>';
+
+    if (data.probabilities && Object.keys(data.probabilities).length > 0) {
+      html += '<h4 style="font-size:0.85rem;font-weight:600;margin:1rem 0 0.5rem;">Class Probabilities</h4>';
+      html += '<div style="display:flex;flex-wrap:wrap;gap:0.5rem;">';
+      const sorted = Object.entries(data.probabilities).sort((a,b) => b[1]-a[1]);
+      for (const [cls, prob] of sorted.slice(0, 10)) {
+        const pct = (prob * 100).toFixed(1);
+        const bg = prob > 0.5 ? 'var(--c-green)' : prob > 0.1 ? 'var(--c-amber)' : 'var(--c-border)';
+        html += `<div style="background:${bg};color:#0f172a;padding:0.25rem 0.75rem;border-radius:9999px;font-size:0.8rem;font-weight:600;">
+          Class ${cls}: ${pct}%</div>`;
+      }
+      html += '</div>';
+    }
+
+    if (data.pose_2d) {
+      html += '<h4 style="font-size:0.85rem;font-weight:600;margin:1rem 0 0.5rem;">Pose 2D Keypoints</h4>';
+      html += `<pre class="sbatch" style="max-height:200px;overflow-y:auto;">${JSON.stringify(data.pose_2d, null, 2)}</pre>`;
+    }
+
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<p style="color:var(--c-red);">Error: ${e.message}</p>`;
+  }
+}
+
+async function recentPreds() {
+  try {
+    const res = await fetch(INFER_BASE + '/predictions/recent?limit=10');
+    const data = await res.json();
+    const card = document.getElementById('result-card');
+    const el = document.getElementById('prediction-result');
+    card.style.display = 'block';
+    if (!data.predictions || data.predictions.length === 0) {
+      el.innerHTML = '<p class="text-muted">No real-time predictions yet. Send CSI data via Gateway.</p>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Time</th><th>Action</th><th>Confidence</th></tr></thead><tbody>';
+    for (const p of data.predictions.reverse()) {
+      const t = new Date(p.timestamp * 1000).toLocaleTimeString();
+      html += `<tr><td class="text-sm">${t}</td><td><strong>${p.action || '?'}</strong></td>
+        <td>${((p.confidence||0)*100).toFixed(1)}%</td></tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+checkStatus();
+</script>
+{% endblock %}
