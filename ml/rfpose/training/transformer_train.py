@@ -45,7 +45,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from rfpose.models.csi_tokenizer import CSITokenizer
 from rfpose.models.transformer import CSITransformerPose
-from rfpose.utils.losses import RFPoseLoss, LossConfig, MPJPE, PA_MPJPE
+from rfpose.data.gold_npz_dataset import build_gold_train_val, NUM_ACTIONS
+from rfpose.utils.losses import RFPoseLoss, LossConfig, MPJPE, PA_MPJPE, skeleton_for_joints
 
 log = logging.getLogger(__name__)
 
@@ -318,6 +319,82 @@ class CSIPoseDataset(Dataset):
 # ===========================================================================
 # Training utilities
 # ===========================================================================
+def build_dataloaders(cfg: DictConfig, device: torch.device):
+    """Build train/val DataLoaders from Gold NPZ or legacy Parquet."""
+    data_format = cfg.data.get("format", "parquet")
+
+    if data_format == "gold_npz":
+        datasets = cfg.data.get("datasets")
+        if datasets is not None:
+            datasets = list(datasets)
+        train_dataset, val_dataset = build_gold_train_val(
+            cfg.data.gold_dir,
+            val_ratio=cfg.data.val_ratio,
+            seed=cfg.training.seed,
+            datasets=datasets,
+            augment=cfg.data.augment,
+            require_pose=cfg.data.get("require_pose", False),
+            require_action=cfg.data.get("require_action", False),
+        )
+    else:
+        full_dataset = CSIPoseDataset(
+            data_dir=cfg.data.gold_dir,
+            window_size=cfg.data.window_size,
+            stride=cfg.data.stride,
+            n_subcarriers=cfg.data.n_subcarriers,
+            n_joints=cfg.data.n_joints,
+            n_nodes=cfg.data.n_nodes,
+            augment=cfg.data.augment,
+            cache_index=True,
+        )
+        n_val = int(len(full_dataset) * cfg.data.val_ratio)
+        n_train = len(full_dataset) - n_val
+        train_dataset, val_dataset = random_split(
+            full_dataset, [n_train, n_val],
+            generator=torch.Generator().manual_seed(cfg.training.seed),
+        )
+
+    pin = device.type == "cuda"
+    nw = cfg.training.num_workers
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg.training.batch_size,
+        shuffle=True,
+        num_workers=nw,
+        pin_memory=pin,
+        drop_last=True,
+        persistent_workers=(nw > 0),
+        prefetch_factor=2 if nw > 0 else None,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg.training.batch_size * 2,
+        shuffle=False,
+        num_workers=nw,
+        pin_memory=pin,
+        persistent_workers=(nw > 0),
+        prefetch_factor=2 if nw > 0 else None,
+    )
+    return train_loader, val_loader, len(train_dataset), len(val_dataset)
+
+
+def build_loss_fn(cfg: DictConfig) -> RFPoseLoss:
+    bones, symmetric = skeleton_for_joints(cfg.data.n_joints)
+    loss_cfg = LossConfig(
+        lambda_coord=cfg.loss.lambda_coord,
+        lambda_vis=cfg.loss.lambda_vis,
+        lambda_bone=cfg.loss.lambda_bone,
+        lambda_temporal=cfg.loss.lambda_temporal,
+        lambda_symmetry=cfg.loss.lambda_symmetry,
+        lambda_action=cfg.loss.get("lambda_action", 0.0),
+        weighting_mode=cfg.loss.get("weighting_mode", "static"),
+        coord_loss_type=cfg.loss.coord_loss_type,
+        bones=bones,
+        symmetric_pairs=symmetric,
+    )
+    return RFPoseLoss(loss_cfg)
+
+
 def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransformerPose]:
     tokenizer = CSITokenizer(
         n_subcarriers=cfg.data.n_subcarriers,
@@ -343,12 +420,74 @@ def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransfo
         dropout=cfg.model.dropout,
         ffn_mult=cfg.model.ffn_mult,
         n_nodes=cfg.data.n_nodes,
+        num_actions=cfg.model.get("num_actions", NUM_ACTIONS),
     )
 
     return tokenizer, model
 
 
-def build_optimizer(model: nn.Module, tokenizer: nn.Module, cfg: DictConfig):
+def load_ssl_pretrained(
+    tokenizer: CSITokenizer,
+    model: CSITransformerPose,
+    ssl_checkpoint: str,
+    freeze_encoder: bool = False,
+) -> None:
+    """Load pretrained SSL encoder weights into tokenizer + model encoders."""
+    ckpt = torch.load(ssl_checkpoint, map_location="cpu", weights_only=True)
+    log.info(f"Loading SSL pretrained encoder from {ssl_checkpoint} (epoch={ckpt.get('epoch', '?')})")
+
+    tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
+    model.spatial_encoder.load_state_dict(ckpt["spatial_encoder"], strict=False)
+    model.temporal_encoder.load_state_dict(ckpt["temporal_encoder"], strict=False)
+
+    if "spatial_to_temporal_norm" in ckpt:
+        model.spatial_to_temporal_norm.load_state_dict(ckpt["spatial_to_temporal_norm"], strict=False)
+
+    log.info(f"SSL encoder loaded. freeze_encoder={freeze_encoder}")
+
+    if freeze_encoder:
+        _freeze_encoder(tokenizer, model)
+
+
+def load_pretrained_full(
+    tokenizer: CSITokenizer,
+    model: CSITransformerPose,
+    checkpoint: str,
+    freeze_encoder: bool = False,
+) -> None:
+    """Load full model checkpoint (Phase 2) for fine-tuning (Phase 3)."""
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    epoch = ckpt.get("epoch", "?")
+    metrics = ckpt.get("metrics", {})
+    log.info(f"Loading pretrained full model from {checkpoint} (epoch={epoch})")
+
+    tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
+    model.load_state_dict(ckpt["model"], strict=False)
+
+    mpjpe = metrics.get("val_mpjpe", "?")
+    log.info(f"Full model loaded (val_mpjpe={mpjpe}). freeze_encoder={freeze_encoder}")
+
+    if freeze_encoder:
+        _freeze_encoder(tokenizer, model)
+
+
+def _freeze_encoder(tokenizer: CSITokenizer, model: CSITransformerPose) -> None:
+    """Freeze tokenizer + encoder weights (only decoder/heads will train)."""
+    for p in tokenizer.parameters():
+        p.requires_grad = False
+    for p in model.spatial_encoder.parameters():
+        p.requires_grad = False
+    for p in model.temporal_encoder.parameters():
+        p.requires_grad = False
+    for p in model.spatial_to_temporal_norm.parameters():
+        p.requires_grad = False
+    log.info("Encoder weights frozen (only decoder/heads will train)")
+
+
+def build_optimizer(
+    model: nn.Module, tokenizer: nn.Module, cfg: DictConfig,
+    loss_fn: nn.Module | None = None,
+):
     """AdamW với weight decay chỉ cho non-bias, non-norm parameters."""
     params_decay    = []
     params_no_decay = []
@@ -361,6 +500,12 @@ def build_optimizer(model: nn.Module, tokenizer: nn.Module, cfg: DictConfig):
                 params_no_decay.append(param)
             else:
                 params_decay.append(param)
+
+    # Uncertainty weighting log-variance params (no weight decay)
+    if loss_fn is not None:
+        for param in loss_fn.parameters():
+            if param.requires_grad:
+                params_no_decay.append(param)
 
     return torch.optim.AdamW(
         [
@@ -440,6 +585,9 @@ def train_one_epoch(
     tokenizer.train()
     model.train()
 
+    lambda_action = cfg.loss.get("lambda_action", 0.0)
+    action_ce = nn.CrossEntropyLoss(ignore_index=-1) if lambda_action > 0 else None
+
     total_metrics: dict[str, float] = {}
     n_batches = 0
 
@@ -454,18 +602,27 @@ def train_one_epoch(
             tokens    = tokenizer(csi)
             out       = model(tokens)
 
-            # model trả về "vis_logits" (raw), loss dùng BCEWithLogitsLoss
             pred_dict = {
                 "coords":     out["coords"],
-                "vis_logits": out["vis_logits"],  # raw logits — KHÔNG sigmoid
+                "vis_logits": out["vis_logits"],
             }
             gt_dict = {"coords": gt_coords, "vis": gt_vis}
             loss, breakdown = loss_fn(pred_dict, gt_dict)
 
+            # Action classification loss (multi-task, masked)
+            if action_ce is not None and "action_label" in batch:
+                gt_action = batch["action_label"].to(device, non_blocking=True)
+                a_mask = batch.get("action_mask", torch.ones_like(gt_action, dtype=torch.float32))
+                a_mask = a_mask.to(device, non_blocking=True).bool()
+                if a_mask.any():
+                    action_loss = action_ce(out["action_logits"][a_mask], gt_action[a_mask])
+                    loss = loss + lambda_action * action_loss
+                    breakdown["loss_action"] = action_loss.item()
+
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(
-            list(tokenizer.parameters()) + list(model.parameters()),
+            list(tokenizer.parameters()) + list(model.parameters()) + list(loss_fn.parameters()),
             max_norm=cfg.training.grad_clip,
         )
         scaler.step(optimizer)
@@ -478,10 +635,16 @@ def train_one_epoch(
 
         if batch_idx % cfg.training.log_every == 0:
             lr = scheduler.get_last_lr()[0]
+            action_str = f" action={breakdown.get('loss_action', 0):.4f}" if "loss_action" in breakdown else ""
             log.info(
                 f"Epoch {epoch} [{batch_idx}/{len(loader)}] "
-                f"loss={breakdown['loss_total']:.4f} lr={lr:.6f}"
+                f"loss={breakdown['loss_total']:.4f}{action_str} lr={lr:.6f}"
             )
+            global_step = epoch * len(loader) + batch_idx
+            step_metrics = {"step_loss": breakdown["loss_total"], "lr": lr}
+            if "loss_action" in breakdown:
+                step_metrics["step_action_loss"] = breakdown["loss_action"]
+            mlflow.log_metrics(step_metrics, step=global_step)
 
         if cfg.training.dry_run:
             break
@@ -504,8 +667,11 @@ def eval_one_epoch(
 
     mpjpe_fn    = MPJPE()
     pa_mpjpe_fn = PA_MPJPE()
+    action_ce = nn.CrossEntropyLoss(ignore_index=-1)
 
     total_metrics: dict[str, float] = {}
+    action_correct = 0
+    action_total = 0
     n_batches = 0
 
     for batch in loader:
@@ -527,6 +693,19 @@ def eval_one_epoch(
         breakdown["mpjpe"]    = mpjpe.item()
         breakdown["pa_mpjpe"] = pa_mpjpe.item()
 
+        # Action accuracy (masked)
+        if "action_label" in batch:
+            gt_action = batch["action_label"].to(device)
+            a_mask = batch.get("action_mask", torch.ones_like(gt_action, dtype=torch.float32))
+            a_mask = a_mask.to(device).bool()
+            if a_mask.any():
+                preds = out["action_logits"][a_mask].argmax(dim=-1)
+                action_correct += (preds == gt_action[a_mask]).sum().item()
+                action_total += a_mask.sum().item()
+                breakdown["loss_action"] = action_ce(
+                    out["action_logits"][a_mask], gt_action[a_mask]
+                ).item()
+
         for k, v in breakdown.items():
             total_metrics[k] = total_metrics.get(k, 0.0) + v
         n_batches += 1
@@ -534,13 +713,16 @@ def eval_one_epoch(
         if cfg.training.dry_run:
             break
 
-    return {f"val_{k}": v / n_batches for k, v in total_metrics.items()}
+    result = {f"val_{k}": v / n_batches for k, v in total_metrics.items()}
+    if action_total > 0:
+        result["val_action_acc"] = action_correct / action_total
+    return result
 
 
 # ===========================================================================
 # Main training function (Hydra entry point)
 # ===========================================================================
-@hydra.main(config_path="configs", config_name="transformer", version_base=None)
+@hydra.main(config_path="../../configs", config_name="transformer_gold", version_base=None)
 def train(cfg: DictConfig) -> None:
     log.info(f"\n{'='*60}")
     log.info("RF-WorldPose Transformer Training")
@@ -557,67 +739,33 @@ def train(cfg: DictConfig) -> None:
     if device.type == "cuda":
         torch.cuda.manual_seed_all(cfg.training.seed)
 
-    # Dataset & Dataloader
-    full_dataset = CSIPoseDataset(
-        data_dir=cfg.data.gold_dir,
-        window_size=cfg.data.window_size,
-        stride=cfg.data.stride,
-        n_subcarriers=cfg.data.n_subcarriers,
-        n_joints=cfg.data.n_joints,
-        n_nodes=cfg.data.n_nodes,
-        augment=cfg.data.augment,
-        cache_index=True,
-    )
-
-    n_val   = int(len(full_dataset) * cfg.data.val_ratio)
-    n_train = len(full_dataset) - n_val
-    train_dataset, val_dataset = random_split(
-        full_dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(cfg.training.seed),
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True,
-        num_workers=cfg.training.num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
-        persistent_workers=(cfg.training.num_workers > 0),
-        prefetch_factor=2 if cfg.training.num_workers > 0 else None,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.training.batch_size * 2,
-        shuffle=False,
-        num_workers=cfg.training.num_workers,
-        pin_memory=(device.type == "cuda"),
-        persistent_workers=(cfg.training.num_workers > 0),
-        prefetch_factor=2 if cfg.training.num_workers > 0 else None,
-    )
-
-    log.info(f"Train samples: {n_train} | Val samples: {n_val}")
+    train_loader, val_loader, n_train, n_val = build_dataloaders(cfg, device)
+    log.info(f"Train samples: {n_train} | Val samples: {n_val} | format={cfg.data.get('format', 'parquet')}")
 
     # Model
     tokenizer, model = build_model_and_tokenizer(cfg)
+
+    # Load pretrained weights (Phase 2 full model OR Phase 1 SSL encoder)
+    pretrained_from = cfg.training.get("pretrained_from", "")
+    ssl_ckpt = cfg.training.get("ssl_pretrained", "")
+    freeze = cfg.training.get("freeze_encoder", False)
+
+    if pretrained_from and Path(pretrained_from).exists():
+        load_pretrained_full(tokenizer, model, pretrained_from, freeze_encoder=freeze)
+    elif ssl_ckpt and Path(ssl_ckpt).exists():
+        load_ssl_pretrained(tokenizer, model, ssl_ckpt, freeze_encoder=freeze)
+
     tokenizer = tokenizer.to(device)
     model     = model.to(device)
 
-    log.info(f"Tokenizer params: {sum(p.numel() for p in tokenizer.parameters()):,}")
-    log.info(f"Model params:     {model.count_params():,}")
+    trainable_tok = sum(p.numel() for p in tokenizer.parameters() if p.requires_grad)
+    trainable_mod = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log.info(f"Tokenizer params: {trainable_tok:,} (trainable)")
+    log.info(f"Model params:     {trainable_mod:,} (trainable)")
 
-    # Loss
-    loss_cfg = LossConfig(
-        lambda_coord=cfg.loss.lambda_coord,
-        lambda_vis=cfg.loss.lambda_vis,
-        lambda_bone=cfg.loss.lambda_bone,
-        lambda_temporal=cfg.loss.lambda_temporal,
-        lambda_symmetry=cfg.loss.lambda_symmetry,
-        coord_loss_type=cfg.loss.coord_loss_type,
-    )
-    loss_fn = RFPoseLoss(loss_cfg).to(device)
+    loss_fn = build_loss_fn(cfg).to(device)
 
-    optimizer = build_optimizer(model, tokenizer, cfg)
+    optimizer = build_optimizer(model, tokenizer, cfg, loss_fn=loss_fn)
     scheduler = build_scheduler(optimizer, cfg, len(train_loader))
 
     # GradScaler — API mới

@@ -37,16 +37,36 @@ COCO_SYMMETRIC_PAIRS = [
     (1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16),
 ]
 
+# RF-WorldPose Gold ETL skeleton (13 joints)
+RFPOSE_13_BONES = [
+    (0, 1), (0, 2),
+    (1, 3), (3, 5), (2, 4), (4, 6),
+    (1, 7), (2, 8), (7, 8),
+    (7, 9), (9, 11), (8, 10), (10, 12),
+]
+RFPOSE_13_SYMMETRIC = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12)]
+
+
+def skeleton_for_joints(n_joints: int) -> tuple[list, list]:
+    if n_joints == 13:
+        return RFPOSE_13_BONES, RFPOSE_13_SYMMETRIC
+    if n_joints == 17:
+        return COCO_BONES, COCO_SYMMETRIC_PAIRS
+    raise ValueError(f"No skeleton definition for n_joints={n_joints}")
+
 
 @dataclass
 class LossConfig:
-    # Loss weights
+    # Loss weights (used when weighting_mode="static")
     lambda_coord:    float = 1.0
     lambda_vis:      float = 0.5
     lambda_bone:     float = 0.3
     lambda_temporal: float = 0.2
     lambda_symmetry: float = 0.1
     lambda_action:   float = 0.0   # non-zero khi có action labels
+
+    # "static" = fixed weights, "uncertainty" = Kendall et al. learnable weights
+    weighting_mode: str = "static"
 
     coord_loss_type: str  = "smooth_l1"
     smooth_l1_beta:  float = 1.0
@@ -101,8 +121,9 @@ def visibility_loss(
     """
     Binary cross-entropy với LOGITS cho joint visibility prediction.
     """
+    pw = torch.tensor(pos_weight, device=pred_vis_logits.device)
     loss = F.binary_cross_entropy_with_logits(
-        pred_vis_logits, gt_vis, pos_weight=pos_weight
+        pred_vis_logits, gt_vis, pos_weight=pw
     )
     return loss
 
@@ -195,24 +216,49 @@ class RFPoseLoss(nn.Module):
     """
     Tổng hợp tất cả loss terms cho RF-WorldPose training.
 
+    Supports 2 weighting modes:
+        "static":      fixed lambda weights from config (default)
+        "uncertainty":  Kendall et al. 2018 — learnable log-variance per task,
+                        automatically balances tasks by their homoscedastic uncertainty.
+                        L_total = Σ (0.5 * exp(-s_i) * L_i + 0.5 * s_i)
+
     Usage:
-        criterion = RFPoseLoss(LossConfig())
+        criterion = RFPoseLoss(LossConfig(weighting_mode="uncertainty"))
         loss, breakdown = criterion(pred_dict, gt_dict, action_labels=...)
         loss.backward()
-
-    Expected pred_dict:
-        'coords':     (B, T, J, C)  — predicted joint coordinates
-        'vis_logits': (B, T, J)     — visibility RAW LOGITS (không sigmoid)
-        'action_logits': (B, num_actions) — optional, từ CLS token
-
-    Expected gt_dict:
-        'coords': (B, T, J, C)  — ground truth coordinates
-        'vis':    (B, T, J)     — ground truth visibility (0/1)
     """
+
+    TASK_NAMES = ["coord", "vis", "bone", "temporal", "symmetry", "action"]
 
     def __init__(self, config: LossConfig | None = None):
         super().__init__()
         self.cfg = config or LossConfig()
+        self.mode = self.cfg.weighting_mode
+
+        if self.mode == "uncertainty":
+            # Learnable log-variance s_i = log(σ²) per task (Kendall et al.)
+            # Initialized to 0 → exp(-0)=1 → starts with equal weighting
+            self.log_vars = nn.ParameterDict({
+                name: nn.Parameter(torch.zeros(1)) for name in self.TASK_NAMES
+            })
+
+    def _uncertainty_weight(
+        self, loss: torch.Tensor, task_name: str,
+    ) -> torch.Tensor:
+        """0.5 * exp(-s) * L + 0.5 * s — auto-balances by task uncertainty."""
+        s = self.log_vars[task_name]
+        return 0.5 * torch.exp(-s) * loss + 0.5 * s
+
+    def _static_weight(self, loss: torch.Tensor, task_name: str) -> torch.Tensor:
+        w = {
+            "coord": self.cfg.lambda_coord,
+            "vis": self.cfg.lambda_vis,
+            "bone": self.cfg.lambda_bone,
+            "temporal": self.cfg.lambda_temporal,
+            "symmetry": self.cfg.lambda_symmetry,
+            "action": self.cfg.lambda_action,
+        }
+        return w[task_name] * loss
 
     def forward(
         self,
@@ -222,7 +268,7 @@ class RFPoseLoss(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, float]]:
 
         pred_coords = pred_dict["coords"]
-        pred_vis_logits = pred_dict["vis_logits"]  # raw logits
+        pred_vis_logits = pred_dict["vis_logits"]
         gt_coords   = gt_dict["coords"]
         gt_vis      = gt_dict["vis"]
 
@@ -236,7 +282,7 @@ class RFPoseLoss(nn.Module):
         )
         breakdown["loss_coord"] = l_coord.item()
 
-        # 2. Visibility loss — dùng BCEWithLogitsLoss với raw logits
+        # 2. Visibility loss
         l_vis = visibility_loss(pred_vis_logits, gt_vis, self.cfg.vis_pos_weight)
         breakdown["loss_vis"] = l_vis.item()
 
@@ -260,21 +306,33 @@ class RFPoseLoss(nn.Module):
 
         # 6. Action classification (optional)
         l_action = torch.tensor(0.0, device=pred_coords.device)
-        if action_labels is not None and "action_logits" in pred_dict:
+        has_action = action_labels is not None and "action_logits" in pred_dict
+        if has_action:
             l_action = action_classification_loss(
                 pred_dict["action_logits"], action_labels
             )
             breakdown["loss_action"] = l_action.item()
 
-        # Total loss
-        total = (
-            self.cfg.lambda_coord    * l_coord +
-            self.cfg.lambda_vis      * l_vis +
-            self.cfg.lambda_bone     * l_bone +
-            self.cfg.lambda_temporal * l_temporal +
-            self.cfg.lambda_symmetry * l_symmetry +
-            self.cfg.lambda_action   * l_action
-        )
+        # Weighted total
+        losses = {
+            "coord": l_coord, "vis": l_vis, "bone": l_bone,
+            "temporal": l_temporal, "symmetry": l_symmetry, "action": l_action,
+        }
+
+        if self.mode == "uncertainty":
+            total = torch.tensor(0.0, device=pred_coords.device)
+            for name, loss in losses.items():
+                if name == "action" and not has_action:
+                    continue
+                weighted = self._uncertainty_weight(loss, name)
+                total = total + weighted
+                # Log effective weight = exp(-s) for monitoring
+                s = self.log_vars[name].item()
+                breakdown[f"w_{name}"] = float(torch.exp(torch.tensor(-s)).item())
+                breakdown[f"s_{name}"] = s
+        else:
+            total = sum(self._static_weight(l, n) for n, l in losses.items())
+
         breakdown["loss_total"] = total.item()
 
         return total, breakdown
@@ -347,20 +405,36 @@ if __name__ == "__main__":
 
     pred_dict = {
         "coords": torch.randn(B, T, J, C),
-        "vis_logits": torch.randn(B, T, J),  # raw logits
+        "vis_logits": torch.randn(B, T, J),
+        "action_logits": torch.randn(B, 13),
     }
     gt_dict = {
         "coords": torch.randn(B, T, J, C),
         "vis": (torch.rand(B, T, J) > 0.3).float(),
     }
+    action_labels = torch.randint(0, 13, (B,))
 
-    cfg = LossConfig(lambda_coord=1.0, lambda_vis=0.5, lambda_bone=0.3)
+    # --- Static weighting ---
+    print("=== Static Weighting ===")
+    cfg = LossConfig(lambda_coord=1.0, lambda_vis=0.5, lambda_bone=0.3, lambda_action=0.5)
     loss_fn = RFPoseLoss(cfg)
-    total, breakdown = loss_fn(pred_dict, gt_dict)
-
+    total, breakdown = loss_fn(pred_dict, gt_dict, action_labels)
     print(f"Total loss: {total.item():.4f}")
     for k, v in breakdown.items():
         print(f"  {k:20s}: {v:.4f}")
 
-    mpjpe = MPJPE()(pred_dict["coords"], gt_dict["coords"], gt_dict["vis"])
-    print(f"\nMPJPE: {mpjpe.item():.4f}")
+    # --- Uncertainty weighting ---
+    print("\n=== Uncertainty Weighting (Kendall et al.) ===")
+    cfg_uw = LossConfig(weighting_mode="uncertainty")
+    loss_fn_uw = RFPoseLoss(cfg_uw)
+    total_uw, breakdown_uw = loss_fn_uw(pred_dict, gt_dict, action_labels)
+    print(f"Total loss: {total_uw.item():.4f}")
+    for k, v in breakdown_uw.items():
+        print(f"  {k:20s}: {v:.4f}")
+
+    # Verify gradients flow to log_vars
+    total_uw.backward()
+    for name, p in loss_fn_uw.log_vars.items():
+        print(f"  grad s_{name:10s}: {p.grad.item():.4f}")
+
+    print(f"\nMPJPE: {MPJPE()(pred_dict['coords'], gt_dict['coords'], gt_dict['vis']).item():.4f}")

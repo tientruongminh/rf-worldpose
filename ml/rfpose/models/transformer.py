@@ -383,6 +383,7 @@ class CLSTokenModule(nn.Module):
         dropout: float = 0.1,
         n_nodes: int = 1,
         n_patches: int = 19,
+        num_actions: int = 13,
     ):
         super().__init__()
         self.n_nodes = n_nodes
@@ -406,7 +407,7 @@ class CLSTokenModule(nn.Module):
         )
         self.norm2 = nn.LayerNorm(d_model)
 
-        self.action_head = nn.Linear(d_model, 6)
+        self.action_head = nn.Linear(d_model, num_actions)
         self.presence_head = nn.Linear(d_model, 1)
 
     def _unflatten_nodes(
@@ -540,6 +541,7 @@ class CSITransformerPose(nn.Module):
         ffn_mult: int = 4,
         max_time: int = 500,
         n_nodes: int = 1,
+        num_actions: int = 13,
     ):
         super().__init__()
         self.d_model = d_model
@@ -548,15 +550,12 @@ class CSITransformerPose(nn.Module):
         self.n_patches = n_patches
 
         # --- Positional embeddings ---
-        # Patch positional embedding (spatial/frequency axis)
         self.patch_pos_embed = nn.Parameter(torch.zeros(1, 1, n_patches, d_model))
         nn.init.trunc_normal_(self.patch_pos_embed, std=0.02)
 
-        # Time positional embedding (temporal axis)
         self.time_pos_embed = nn.Parameter(torch.zeros(1, max_time, 1, d_model))
         nn.init.trunc_normal_(self.time_pos_embed, std=0.02)
 
-        # Node embedding cho multi-node — mỗi node có embedding riêng
         if n_nodes > 1:
             self.node_pos_embed = nn.Embedding(n_nodes, d_model)
             nn.init.trunc_normal_(self.node_pos_embed.weight, std=0.02)
@@ -579,6 +578,7 @@ class CSITransformerPose(nn.Module):
             d_model=d_model, n_heads=spatial_heads,
             ffn_mult=ffn_mult, dropout=dropout,
             n_nodes=n_nodes, n_patches=n_patches,
+            num_actions=num_actions,
         )
 
         # --- Pose Decoder ---
