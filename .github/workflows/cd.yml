@@ -1,0 +1,21 @@
+name: CD - Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        run: |
+          echo "Connecting to $VPS_HOST..."
+          sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@"$VPS_HOST" "cd /opt/rfpose/rf-worldpose && git fetch origin main && git reset --hard origin/main && cd infra/docker-compose && docker compose up -d --force-recreate --remove-orphans 2>&1 && sleep 15 && docker compose ps && echo DEPLOY_OK"

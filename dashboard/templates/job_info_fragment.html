@@ -1,0 +1,79 @@
+{# Partial rendered for HTMX swaps #}
+{% if message %}
+<div class="flash flash-{{ message_type or 'success' }}" style="margin-bottom:1rem;">{{ message }}</div>
+{% endif %}
+
+<div class="grid-2 gap-4">
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Job Details</h3>
+    <dl class="detail-grid">
+      <dt>Status</dt>
+      <dd><span class="badge badge-{{ job.status }}">{{ job.status }}</span></dd>
+
+      <dt>Slurm Job ID</dt>
+      <dd>{{ job.slurm_job_id or '—' }}</dd>
+
+      <dt>Slurm State</dt>
+      <dd>{{ job.slurm_state or '—' }}</dd>
+
+      <dt>Backend</dt>
+      <dd>{{ job.backend }}</dd>
+
+      <dt>Dataset</dt>
+      <dd>{{ job.dataset_version }}</dd>
+
+      <dt>Submitted By</dt>
+      <dd>{{ job.submitted_by or '—' }}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Timeline</h3>
+    <dl class="detail-grid">
+      <dt>Created</dt>
+      <dd>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') if job.created_at else '—' }}</dd>
+
+      <dt>Submitted</dt>
+      <dd>{{ job.submitted_at.strftime('%Y-%m-%d %H:%M:%S') if job.submitted_at else '—' }}</dd>
+
+      <dt>Started</dt>
+      <dd>{{ job.started_at.strftime('%Y-%m-%d %H:%M:%S') if job.started_at else '—' }}</dd>
+
+      <dt>Finished</dt>
+      <dd>{{ job.finished_at.strftime('%Y-%m-%d %H:%M:%S') if job.finished_at else '—' }}</dd>
+
+      <dt>Last Updated</dt>
+      <dd>{{ job.updated_at.strftime('%Y-%m-%d %H:%M:%S') if job.updated_at else '—' }}</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="card mt-4">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Training Config</h3>
+  <pre class="sbatch" style="max-height:200px; overflow-y:auto;">{{ job.train_config }}</pre>
+</div>
+
+<div class="card mt-4">
+  <h3 style="font-size:1rem; font-weight:600; margin-bottom:1rem;">Artifacts</h3>
+  <dl class="detail-grid">
+    <dt>Model Artifact</dt>
+    <dd>
+      {% if job.artifact_uri %}
+      <a href="{{ job.artifact_uri }}" target="_blank">{{ job.artifact_uri }}</a>
+      {% else %}
+      <span class="text-muted">s3://rfpose/models/rfpose-{{ job.slurm_job_id or '?' }}/</span>
+      {% endif %}
+    </dd>
+
+    <dt>Eval Report</dt>
+    <dd>{{ job.eval_report_uri or '—' }}</dd>
+
+    <dt>Logs</dt>
+    <dd>{{ job.logs_uri or '—' }}</dd>
+
+    {% if job.error_message %}
+    <dt>Error</dt>
+    <dd style="color:var(--c-red);">{{ job.error_message }}</dd>
+    {% endif %}
+  </dl>
+</div>

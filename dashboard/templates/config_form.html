@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if editing else "New" }} Config{% endblock %}
+
+{% block content %}
+<a href="/configs" class="text-sm text-muted">&larr; Back to Config Registry</a>
+<h2 style="font-size:1.5rem; font-weight:700; margin-top:0.25rem; margin-bottom:1.5rem;">
+  {{ "Edit Config" if editing else "Register New Training Config" }}
+</h2>
+
+{% if error %}
+<div class="flash flash-error">{{ error }}</div>
+{% endif %}
+
+<form method="POST"
+      action="{% if editing %}/configs/{{ config.id }}/edit{% else %}/configs/new{% endif %}"
+      class="card">
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="config_id">Config ID</label>
+      <input type="text" id="config_id" name="config_id"
+             {% if editing %}readonly style="opacity:0.6;"{% endif %}
+             required placeholder="e.g. wipose-action-v2"
+             value="{{ config.id if config else '' }}">
+      <p class="text-sm text-muted mt-2">Unique ID, used in dropdown and job tracking.</p>
+    </div>
+    <div>
+      <label for="label">Display Name</label>
+      <input type="text" id="label" name="label" required
+             placeholder="e.g. Wi-Pose Action Recognition v2"
+             value="{{ config.label if config else '' }}">
+    </div>
+  </div>
+
+  <div class="mb-4">
+    <label for="description">Description</label>
+    <input type="text" id="description" name="description"
+           placeholder="Short description of what this config trains"
+           value="{{ config.description if config else '' }}">
+  </div>
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="script_path">Training Script Path</label>
+      <input type="text" id="script_path" name="script_path" required
+             placeholder="training/train_wipose_action.py"
+             value="{{ config.script_path if config else 'training/train.py' }}">
+      <p class="text-sm text-muted mt-2">Relative to repo root. HPC runs: <code>python &lt;script&gt;</code></p>
+    </div>
+    <div>
+      <label for="dataset_hint">Default Dataset</label>
+      <select id="dataset_hint" name="dataset_hint">
+        <option value="">None (user selects manually)</option>
+        {% for ds in datasets %}
+        <option value="{{ ds.id }}" {% if config and config.dataset_hint == ds.id %}selected{% endif %}>
+          {{ ds.id }}
+        </option>
+        {% endfor %}
+      </select>
+      <p class="text-sm text-muted mt-2">Auto-selects this dataset when preset is chosen.</p>
+    </div>
+  </div>
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="git_repo">Git Repository</label>
+      <input type="text" id="git_repo" name="git_repo"
+             placeholder="https://github.com/tientruongminh/rf-worldpose"
+             value="{{ config.git_repo if config else 'https://github.com/tientruongminh/rf-worldpose' }}">
+    </div>
+    <div>
+      <label for="git_branch">Branch</label>
+      <input type="text" id="git_branch" name="git_branch"
+             placeholder="main"
+             value="{{ config.git_branch if config else 'main' }}">
+    </div>
+  </div>
+
+  <div class="grid-2 gap-4 mb-4">
+    <div>
+      <label for="hyperparams">Hyperparameters</label>
+      <textarea id="hyperparams" name="hyperparams" rows="8"
+                placeholder="epochs=50&#10;batch_size=128&#10;lr=3e-4&#10;num_classes=12">{{ config.hyperparams if config else '' }}</textarea>
+      <p class="text-sm text-muted mt-2">Key=value format, one per line. Passed as env vars to training script.</p>
+    </div>
+    <div>
+      <label for="requirements">Pip Requirements</label>
+      <textarea id="requirements" name="requirements" rows="4"
+                placeholder="torch mlflow numpy h5py">{{ config.requirements if config else 'torch mlflow numpy h5py' }}</textarea>
+      <p class="text-sm text-muted mt-2">Space-separated packages. Installed on HPC before training.</p>
+
+      <label for="created_by" class="mt-4">Created By</label>
+      <select id="created_by" name="created_by">
+        <option value="system" {% if not config or config.created_by == 'system' %}selected{% endif %}>system</option>
+        <option value="ngan" {% if config and config.created_by == 'ngan' %}selected{% endif %}>Ngân</option>
+        <option value="ngoc" {% if config and config.created_by == 'ngoc' %}selected{% endif %}>Ngọc</option>
+        <option value="huong" {% if config and config.created_by == 'huong' %}selected{% endif %}>Hương</option>
+        <option value="tien" {% if config and config.created_by == 'tien' %}selected{% endif %}>Tiền</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="flex gap-2 mt-6">
+    <button type="submit" class="btn btn-primary">{{ "Save Changes" if editing else "Register Config" }}</button>
+    <a href="/configs" class="btn btn-ghost">Cancel</a>
+  </div>
+</form>
+{% endblock %}

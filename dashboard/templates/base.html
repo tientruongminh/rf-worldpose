@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}RF-WorldPose{% endblock %} — Job Portal</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.4/src/utilities.css" rel="stylesheet">
+  <style>
+    /* Minimal inline Tailwind-like utilities (CDN play) */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; }
+    :root { --c-bg: #0f172a; --c-surface: #1e293b; --c-border: #334155;
+            --c-text: #e2e8f0; --c-muted: #94a3b8; --c-accent: #38bdf8;
+            --c-green: #4ade80; --c-red: #f87171; --c-amber: #fbbf24; }
+    body { font-family: 'Inter', system-ui, -apple-system, sans-serif;
+           background: var(--c-bg); color: var(--c-text); min-height: 100vh; }
+    a { color: var(--c-accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 1.5rem; }
+    .navbar { background: var(--c-surface); border-bottom: 1px solid var(--c-border);
+              padding: 1rem 0; margin-bottom: 2rem; }
+    .navbar-inner { display: flex; align-items: center; justify-content: space-between; }
+    .navbar h1 { font-size: 1.25rem; font-weight: 700; }
+    .navbar nav { display: flex; gap: 1.5rem; font-size: 0.9rem; }
+
+    .card { background: var(--c-surface); border: 1px solid var(--c-border);
+            border-radius: 0.75rem; padding: 1.5rem; }
+    .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem;
+           border-radius: 0.5rem; font-size: 0.875rem; font-weight: 500;
+           cursor: pointer; border: 1px solid transparent; transition: all 0.15s; }
+    .btn-primary { background: var(--c-accent); color: #0f172a; }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-danger { background: var(--c-red); color: #0f172a; }
+    .btn-ghost { background: transparent; border-color: var(--c-border); color: var(--c-text); }
+    .btn-ghost:hover { background: var(--c-border); }
+    .btn-sm { padding: 0.25rem 0.75rem; font-size: 0.8rem; }
+
+    input, select, textarea { background: var(--c-bg); border: 1px solid var(--c-border);
+      color: var(--c-text); padding: 0.5rem 0.75rem; border-radius: 0.5rem; width: 100%;
+      font-size: 0.9rem; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--c-accent); }
+    label { font-size: 0.8rem; font-weight: 600; color: var(--c-muted); margin-bottom: 0.25rem;
+            display: block; text-transform: uppercase; letter-spacing: 0.05em; }
+
+    .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 9999px;
+             font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+    .badge-created { background: #334155; color: var(--c-muted); }
+    .badge-submitted { background: #1e3a5f; color: var(--c-accent); }
+    .badge-running { background: #164e3a; color: var(--c-green); }
+    .badge-completed { background: #14532d; color: var(--c-green); }
+    .badge-failed { background: #450a0a; color: var(--c-red); }
+    .badge-cancelled { background: #422006; color: var(--c-amber); }
+
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+         letter-spacing: 0.05em; color: var(--c-muted); padding: 0.75rem 1rem;
+         border-bottom: 1px solid var(--c-border); }
+    td { padding: 0.75rem 1rem; border-bottom: 1px solid var(--c-border); font-size: 0.875rem; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+    .mt-2 { margin-top: 0.5rem; } .mt-4 { margin-top: 1rem; } .mt-6 { margin-top: 1.5rem; }
+    .mb-4 { margin-bottom: 1rem; } .mb-6 { margin-bottom: 1.5rem; }
+    .text-muted { color: var(--c-muted); } .text-sm { font-size: 0.875rem; }
+    .flex { display: flex; } .items-center { align-items: center; }
+    .justify-between { justify-content: space-between; } .gap-2 { gap: 0.5rem; }
+    .gap-4 { gap: 1rem; }
+
+    .stat-card { text-align: center; }
+    .stat-card .number { font-size: 2rem; font-weight: 700; }
+    .stat-card .label { font-size: 0.8rem; color: var(--c-muted); }
+
+    .htmx-indicator { opacity: 0; transition: opacity 200ms; }
+    .htmx-request .htmx-indicator { opacity: 1; }
+    .spinner { display: inline-block; width: 1rem; height: 1rem;
+               border: 2px solid var(--c-border); border-top-color: var(--c-accent);
+               border-radius: 50%; animation: spin 0.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .flash { padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem;
+             font-size: 0.875rem; }
+    .flash-success { background: #14532d; color: var(--c-green); border: 1px solid #166534; }
+    .flash-error { background: #450a0a; color: var(--c-red); border: 1px solid #7f1d1d; }
+
+    .detail-grid { display: grid; grid-template-columns: 180px 1fr; gap: 0.5rem 1rem; }
+    .detail-grid dt { color: var(--c-muted); font-size: 0.8rem; text-transform: uppercase; }
+    .detail-grid dd { font-size: 0.9rem; }
+
+    pre.sbatch { background: var(--c-bg); border: 1px solid var(--c-border);
+                 border-radius: 0.5rem; padding: 1rem; overflow-x: auto;
+                 font-size: 0.8rem; line-height: 1.6; }
+
+    @media (max-width: 768px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      table { font-size: 0.8rem; }
+      td, th { padding: 0.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="navbar">
+    <div class="container navbar-inner">
+      <h1>RF-WorldPose Job Portal</h1>
+      <nav>
+        <a href="/">Dashboard</a>
+        <a href="/configs">Configs</a>
+        <a href="/submit">New Job</a>
+        <a href="/models">Models</a>
+        <a href="/inference">Inference</a>
+        <a href="/connection">HPC</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer style="text-align:center; padding:2rem 0; margin-top:3rem;">
+    <p class="text-sm text-muted">RF-WorldPose &middot; Helios HPC Job Portal</p>
+  </footer>
+</body>
+</html>
