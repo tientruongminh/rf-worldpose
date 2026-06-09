@@ -1,0 +1,33 @@
+# Eval job config — submittable from Portal like a training job
+# Evaluates a trained model on the test split
+#
+# Checkpoint sources:
+#   Local file:   eval.checkpoint: "/path/to/best.pt"
+#   MLflow:       eval.checkpoint: "mlflow://RUN_ID/best.pt"
+
+data:
+  gold_dir: "/app/data/gold/rfpose-multitask-v1"
+  datasets: null                   # null = all datasets, or ["uthar", "wiar"]
+  n_subcarriers: 270
+  n_joints: 13
+  n_nodes: 1
+  window_size: 60
+
+eval:
+  checkpoint: "mlflow://0c1bdd55e9b24f7094a36172a042ac63/best.pt"
+  device: "cuda"
+  batch_size: 64
+  num_workers: 4
+
+# Sbatch passes these but eval ignores them — needed so Hydra doesn't reject
+training:
+  device: "cuda"
+  epochs: 1
+  batch_size: 64
+  dry_run: false
+  checkpoint_dir: ""
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "eval-demo"

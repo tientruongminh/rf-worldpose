@@ -1,0 +1,35 @@
+# Subcarrier Attention tokenizer on WiPose ONLY (coords normalized mm→meters)
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: ["wipose"]
+  val_ratio: 0.2
+  require_pose: true
+  require_action: true
+
+model:
+  variant: "subcarrier_attn"
+  n_tokens: 19
+  n_attn_heads: 4
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 300
+  lr: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+  save_every: 10
+  log_every: 50
+  amp: true
+  num_workers: 4
+  dry_run: false
+  ssl_pretrained: "s3://rfpose/mlflow/5/62a95b29c2e3499e82983f5e8ecb120e/artifacts/checkpoints/best"
+  freeze_encoder: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "subcattn-wipose-v1"

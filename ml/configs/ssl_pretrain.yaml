@@ -1,0 +1,53 @@
+# SSL Pretraining: Masked CSI Reconstruction + Temporal Contrastive
+# Phase 1: learn CSI embeddings without labels (all Silver data)
+# Phase 2: fine-tune on Gold data with pose + action labels
+
+data:
+  silver_dir: "/app/data/silver/rfpose-multitask-v1"
+  unified_dir: "/app/data/silver_unified/rfpose-multitask-v1"
+  n_subcarriers: 270      # N_padded from Silver-Unified
+  n_padded: 270
+  window_size: 60
+  min_timesteps: 60
+  val_ratio: 0.1
+
+model:
+  patch_size: 6            # 270 / 6 = 45 patches
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  ffn_mult: 4
+  dropout: 0.1
+
+ssl:
+  mask_ratio: 0.4          # mask 40% of patches
+  lambda_recon: 1.0        # masked reconstruction weight
+  lambda_contrast: 0.5     # temporal contrastive weight
+  temperature: 0.07        # InfoNCE temperature
+  proj_dim: 128            # contrastive projection dim
+
+training:
+  epochs: 30
+  batch_size: 64
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 2
+  grad_clip: 1.0
+  save_every: 5
+  log_every: 50
+  amp: true
+  num_workers: 4
+  seed: 42
+  device: "cuda"
+  checkpoint_dir: "checkpoints/ssl"
+  dry_run: false
+
+mlflow:
+  tracking_uri: ""
+  experiment_name: "rf-worldpose-ssl"
+  run_name: "ssl-pretrain"
+  log_batch_metrics: true    # realtime batch loss curves
+  log_checkpoints: true      # upload .pt to MLflow on each save
+  log_every: 50              # MLflow batch log interval (default: training.log_every)

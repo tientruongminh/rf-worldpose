@@ -1,0 +1,39 @@
+# MetaFi++ baseline model on MM-Fi ONLY
+# Reference: Zhou et al., IEEE IoT Journal 2023
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: ["mmfi"]
+  val_ratio: 0.2
+  require_pose: true
+  require_action: true
+
+model:
+  variant: "metafi"
+  d_model: 256
+  n_encoder_layers: 4
+  n_encoder_heads: 8
+  ffn_mult: 2
+  dropout: 0.2
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 200
+  lr: 1.5e-3
+  warmup_epochs: 5
+  patience: 25
+  save_every: 10
+  log_every: 50
+  amp: true
+  num_workers: 4
+  dry_run: false
+  ssl_pretrained: ""
+  freeze_encoder: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "metafi-mmfi-v1"

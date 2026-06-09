@@ -5,13 +5,13 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = Field(default="postgresql://rfpose:rfpose@localhost:5432/rfpose", alias="DATABASE_URL")
 
-    # HPC
-    hpc_login: str = Field(default="", alias="HPC_LOGIN")
-    hpc_user: str = Field(default="", alias="HPC_USER")
-    hpc_ssh_key: str = Field(default="", alias="HPC_SSH_KEY")
-    hpc_account: str = Field(default="", alias="HPC_ACCOUNT")
-    hpc_partition: str = Field(default="", alias="HPC_PARTITION")
-    hpc_work_dir: str = Field(default="~/rfpose-jobs", alias="HPC_WORK_DIR")
+    # HPC (Eagle)
+    hpc_login: str = Field(default="eagle.man.poznan.pl", alias="HPC_LOGIN")
+    hpc_user: str = Field(default="tiencd1234", alias="HPC_USER")
+    hpc_ssh_key: str = Field(default="/root/.ssh/id_ed25519", alias="HPC_SSH_KEY")
+    hpc_account: str = Field(default="pl0501-01", alias="HPC_ACCOUNT")
+    hpc_partition: str = Field(default="proxima", alias="HPC_PARTITION")
+    hpc_work_dir: str = Field(default="~/pl0501-01/project_data/rf-worldpose", alias="HPC_WORK_DIR")
 
     # S3 / MinIO
     s3_bucket: str = Field(default="rfpose", alias="S3_BUCKET")

@@ -1,0 +1,38 @@
+# Root-Relative Coordinate Prediction (Improvement #5)
+# Model predicts root (pelvis) position + joint offsets separately
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: null
+  val_ratio: 0.2
+  require_pose: true
+  require_action: true
+
+model:
+  variant: "rootrel"
+
+loss:
+  lambda_root: 1.0
+  lambda_offset: 1.0
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 200
+  lr: 1.0e-4
+  warmup_epochs: 5
+  patience: 25
+  save_every: 10
+  log_every: 50
+  amp: true
+  num_workers: 4
+  dry_run: false
+  ssl_pretrained: "s3://rfpose/mlflow/5/62a95b29c2e3499e82983f5e8ecb120e/artifacts/checkpoints/best"
+  freeze_encoder: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "rootrel-v1"

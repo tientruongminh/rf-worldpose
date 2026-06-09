@@ -1,10 +1,32 @@
 [project]
 name = "rfpose-ml"
 version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = ["torch", "numpy", "scikit-learn", "hydra-core", "mlflow", "onnx", "onnxscript"]
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "einops",
+    "scikit-learn",
+    "hydra-core",
+    "omegaconf",
+    "mlflow",
+    "boto3",
+    "onnx",
+    "onnxscript",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["rfpose", "rfpose.data", "rfpose.models", "rfpose.training", "rfpose.evaluation", "rfpose.export", "rfpose.packaging"]
-package-dir = {"" = "."}
-
+packages = [
+    "rfpose",
+    "rfpose.data",
+    "rfpose.models",
+    "rfpose.training",
+    "rfpose.evaluation",
+    "rfpose.export",
+    "rfpose.packaging",
+    "rfpose.utils",
+]

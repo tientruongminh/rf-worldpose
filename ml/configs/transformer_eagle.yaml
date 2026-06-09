@@ -1,0 +1,18 @@
+# Eagle HPC training — overrides for transformer_gold.yaml
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-unified-v2"
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 50
+  num_workers: 4
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "eagle-transformer-v1"

@@ -1,0 +1,10 @@
+[project]
+name = "rfpose-eagle"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["rfpose_eagle*"]
+
+[tool.setuptools.package-data]
+rfpose_eagle = ["../templates/*.sbatch"]
