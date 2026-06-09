@@ -1,0 +1,65 @@
+# Train CSI Transformer on Dagster Gold NPZ (x.npy + y.npz)
+# Supports 2-phase training:
+#   Phase 1: SSL pretrain (ssl_pretrain.yaml) → csi_encoder_pretrained.pt
+#   Phase 2: Fine-tune with pose + action labels (this config)
+
+data:
+  format: "gold_npz"
+  gold_dir: "/app/data/gold/rfpose-unified-v2"
+  n_subcarriers: 270        # N_padded from Silver-Unified
+  n_joints: 13              # RF-WorldPose skeleton
+  n_nodes: 1
+  window_size: 60           # pre-cut in Gold ETL
+  stride: 10                # unused for gold_npz (windows pre-cut)
+  val_ratio: 0.2
+  augment: true
+  require_pose: false       # include activity-only samples (pose_mask=0)
+  require_action: false     # include pose-only samples (action_mask=0)
+  datasets: null            # null = all 6 datasets
+
+model:
+  patch_size: 6             # 270 / 6 = 45 patches
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4              # Dùng cho CSIEncoder 
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2      # Dùng cho PoseDecoder
+  ffn_mult: 4
+  predict_3d: true
+  causal_temporal: false
+  dropout: 0.1
+  num_actions: 28           # từ UNIFIED_ACTIONS trong gold_npz_dataset.py
+
+loss:
+  weighting_mode: "uncertainty"  # Kích hoạt Kendall Loss tự động cân bằng đa nhiệm theo Code V3
+  coord_loss_type: "smooth_l1"
+
+training:
+  epochs: 50
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  grad_clip: 1.0
+  warmup_epochs: 3
+  patience: 15
+  save_every: 5
+  log_every: 50
+  amp: true
+  num_workers: 4
+  seed: 42
+  device: "cuda"
+  resume_from: ""
+  ssl_pretrained: "csi_encoder_pretrained.pt"   # Trỏ thẳng đến file trọng số Phase 1 đang có trong thư mục 
+  pretrained_from: ""
+  freeze_encoder: true            
+  dry_run: false
+  checkpoint_dir: "checkpoints"    # Tạo thư mục lưu file best.pt rõ ràng
+
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "transformer-gold-npz-v3-multi-task" # Đổi tên run_name để phân biệt trên MLflow
