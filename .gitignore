@@ -29,3 +29,8 @@ scripts/setup_server.py
 # Next.js dashboard
 .next/
 dashboard/.next/
+
+# ko push
+ml/experiment_log.md
+ml/rfpose/data/label_maps.json
+ml/rfpose/data/manifest.json
