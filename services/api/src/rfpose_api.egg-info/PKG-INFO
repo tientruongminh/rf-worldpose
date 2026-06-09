@@ -7,3 +7,5 @@ Requires-Dist: uvicorn[standard]
 Requires-Dist: pydantic
 Requires-Dist: pydantic-settings
 Requires-Dist: psycopg[binary]
+Requires-Dist: psycopg-pool
+Requires-Dist: paramiko

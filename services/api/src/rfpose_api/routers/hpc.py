@@ -1,4 +1,17 @@
 """REST API for Eagle HPC operations — submit, status, cancel training jobs."""
+import sys
+from pathlib import Path
+
+# Ép hệ thống tìm kiếm gói rfpose_eagle trong thư mục eagle_runner ở thư mục gốc /app
+sys.path.append("/app/eagle_runner")
+sys.path.append("/app")
+
+from __future__ import annotations
+
+import logging
+import subprocess
+...
+
 from __future__ import annotations
 
 import logging

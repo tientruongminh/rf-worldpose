@@ -9,3 +9,4 @@ Requires-Dist: pyarrow
 Requires-Dist: pydantic
 Requires-Dist: pandera
 Requires-Dist: boto3
+Requires-Dist: numpy

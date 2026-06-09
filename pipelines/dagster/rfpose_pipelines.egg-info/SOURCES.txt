@@ -7,8 +7,11 @@ rfpose_pipelines.egg-info/requires.txt
 rfpose_pipelines.egg-info/top_level.txt
 rfpose_pipelines/assets/data_lake.py
 rfpose_pipelines/etl/__init__.py
+rfpose_pipelines/etl/bronze_to_gold_adapters.py
 rfpose_pipelines/etl/bronze_to_silver.py
 rfpose_pipelines/etl/join_labels.py
 rfpose_pipelines/etl/silver_to_gold.py
+rfpose_pipelines/jobs/__init__.py
 rfpose_pipelines/jobs/training_jobs.py
-rfpose_pipelines/sensors/hard_case_sensor.py
+rfpose_pipelines/sensors/__init__.py
+rfpose_pipelines/sensors/data_sensors.py

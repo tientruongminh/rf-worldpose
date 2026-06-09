@@ -5,3 +5,4 @@ pyarrow
 pydantic
 pandera
 boto3
+numpy
