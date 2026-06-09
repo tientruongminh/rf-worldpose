@@ -17,6 +17,7 @@ CONFIG_TO_MODULE = {
     "quick_test": "rfpose.training.transformer_train",
     "demo": "rfpose.training.transformer_train",
     "eval_demo": "rfpose.evaluation.eval_job",
+    "config":            "rfpose.training.transformer_train",
 }
 
 
