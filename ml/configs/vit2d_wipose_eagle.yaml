@@ -1,0 +1,25 @@
+# Inherit all robust data pipeline settings from the team
+defaults:
+  - transformer_gold
+
+data:
+  datasets: ["wipose"]
+  
+model:
+  patch_size: [6, 10]  # First value is freq_patch, second is ignored but kept for tracking
+  d_model: 128         # Reduced capacity to prevent overfitting (Knowledge Distillation prep)
+  spatial_heads: 8
+  n_spatial_layers: 4  # Total layers for the single ViT Encoder
+  n_decoder_layers: 3
+  dropout: 0.1
+
+training:
+  epochs: 150
+  batch_size: 32       # Increase to 64 if GPU memory allows
+  lr: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+
+mlflow:
+  experiment_name: "rf-worldpose-vit2d"
+  run_name: "vit2d-patching-huong-wipose"
