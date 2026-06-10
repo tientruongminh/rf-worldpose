@@ -34,7 +34,7 @@ class EagleJobSpec:
     job_id: str
     config_name: str = "transformer_eagle"
     train_module: str = ""
-    dataset_version: str = "rfpose-multitask-v1"
+    dataset_version: str = "rfpose-unified-v2"
     project_root: str = "pl0501-01/project_data/rf-worldpose"
     partition: str = "proxima"
     gpu_type: str = "h100"
