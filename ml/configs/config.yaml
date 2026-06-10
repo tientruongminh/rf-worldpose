@@ -5,7 +5,7 @@
 
 data:
   format: "gold_npz"
-  gold_dir: "/app/data/gold/rfpose-unified-v2"
+  gold_dir:  "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-unified-v2"
   n_subcarriers: 270        # N_padded from Silver-Unified
   n_joints: 13              # RF-WorldPose skeleton
   n_nodes: 1
