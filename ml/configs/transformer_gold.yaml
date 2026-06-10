@@ -59,7 +59,7 @@ training:
   seed: 42
   device: "cuda"
   resume_from: ""
-  ssl_pretrained: ""        # Phase 1: path to csi_encoder_pretrained.pt
+  ssl_pretrained: "csi_encoder_pretrained.pt"        # Phase 1: path to csi_encoder_pretrained.pt
   pretrained_from: ""       # Phase 2→3: path to full model checkpoint (best.pt)
   freeze_encoder: false     # freeze encoder weights during fine-tuning
   dry_run: false

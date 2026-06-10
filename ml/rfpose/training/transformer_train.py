@@ -44,7 +44,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from rfpose.models.csi_tokenizer import CSITokenizer
-from rfpose.models.transformer import CSITransformerPose
+from rfpose.models.transformer import CSITransformerPose, SpatialEncoder, TemporalEncoder
+from rfpose.models.cnn_embedding_head import CSIEncoderCNNModel, TemporalCNNHead
 from rfpose.data.gold_npz_dataset import build_gold_train_val, NUM_ACTIONS
 from rfpose.utils.losses import RFPoseLoss, LossConfig, MPJPE, PA_MPJPE, skeleton_for_joints
 
@@ -395,7 +396,8 @@ def build_loss_fn(cfg: DictConfig) -> RFPoseLoss:
     return RFPoseLoss(loss_cfg)
 
 
-def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransformerPose]:
+def build_model_and_tokenizer(cfg: DictConfig) -> tuple[Optional[CSITokenizer], nn.Module]:
+    arch = cfg.model.get("arch", "transformer")
     tokenizer = CSITokenizer(
         n_subcarriers=cfg.data.n_subcarriers,
         patch_size=cfg.model.patch_size,
@@ -404,6 +406,43 @@ def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransfo
         n_nodes=cfg.data.n_nodes,
         dropout=cfg.model.dropout,
     )
+
+    if arch == "ssl_cnn":
+        spatial_encoder = SpatialEncoder(
+            d_model=cfg.model.d_model,
+            n_heads=cfg.model.spatial_heads,
+            n_layers=cfg.model.n_spatial_layers,
+            ffn_mult=cfg.model.ffn_mult,
+            dropout=cfg.model.dropout,
+        )
+        temporal_encoder = TemporalEncoder(
+            d_model=cfg.model.d_model,
+            n_heads=cfg.model.temporal_heads,
+            n_layers=cfg.model.n_temporal_layers,
+            ffn_mult=cfg.model.ffn_mult,
+            dropout=cfg.model.dropout,
+            causal=cfg.model.get("causal_temporal", cfg.model.get("causal", False)),
+        )
+        cnn_head = TemporalCNNHead(
+            d_model=cfg.model.d_model,
+            hidden_dim=cfg.model.get("cnn_hidden_dim", cfg.model.d_model),
+            n_layers=cfg.model.get("cnn_layers", 2),
+            kernel_size=cfg.model.get("cnn_kernel_size", 3),
+            dropout=cfg.model.dropout,
+            n_joints=cfg.data.n_joints,
+            num_actions=cfg.model.get("num_actions", NUM_ACTIONS),
+        )
+        model = CSIEncoderCNNModel(
+            tokenizer=tokenizer,
+            spatial_encoder=spatial_encoder,
+            temporal_encoder=temporal_encoder,
+            spatial_to_temporal_norm=nn.LayerNorm(cfg.model.d_model),
+            cnn_head=cnn_head,
+        )
+        return None, model
+
+    if arch != "transformer":
+        raise ValueError(f"Unsupported model.arch: {arch}")
 
     model = CSITransformerPose(
         n_patches=tokenizer.n_patches,
@@ -450,8 +489,8 @@ def load_ssl_pretrained(
 
 
 def load_pretrained_full(
-    tokenizer: CSITokenizer,
-    model: CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model: nn.Module,
     checkpoint: str,
     freeze_encoder: bool = False,
 ) -> None:
@@ -461,14 +500,16 @@ def load_pretrained_full(
     metrics = ckpt.get("metrics", {})
     log.info(f"Loading pretrained full model from {checkpoint} (epoch={epoch})")
 
-    tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
+    if tokenizer is not None and "tokenizer" in ckpt:
+        tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
     model.load_state_dict(ckpt["model"], strict=False)
 
     mpjpe = metrics.get("val_mpjpe", "?")
     log.info(f"Full model loaded (val_mpjpe={mpjpe}). freeze_encoder={freeze_encoder}")
 
-    if freeze_encoder:
-        _freeze_encoder(tokenizer, model)
+    freeze_tokenizer = tokenizer if tokenizer is not None else getattr(model, "tokenizer", None)
+    if freeze_encoder and freeze_tokenizer is not None:
+        _freeze_encoder(freeze_tokenizer, model)
 
 
 def _freeze_encoder(tokenizer: CSITokenizer, model: CSITransformerPose) -> None:
@@ -485,7 +526,7 @@ def _freeze_encoder(tokenizer: CSITokenizer, model: CSITransformerPose) -> None:
 
 
 def build_optimizer(
-    model: nn.Module, tokenizer: nn.Module, cfg: DictConfig,
+    model: nn.Module, tokenizer: nn.Module | None, cfg: DictConfig,
     loss_fn: nn.Module | None = None,
 ):
     """AdamW với weight decay chỉ cho non-bias, non-norm parameters."""
@@ -493,6 +534,8 @@ def build_optimizer(
     params_no_decay = []
 
     for module in [tokenizer, model]:
+        if module is None:
+            continue
         for name, param in module.named_parameters():
             if not param.requires_grad:
                 continue
@@ -534,8 +577,8 @@ def build_scheduler(optimizer, cfg: DictConfig, n_steps_per_epoch: int):
 
 def save_checkpoint(
     epoch: int,
-    tokenizer: CSITokenizer,
-    model: CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model: nn.Module,
     optimizer,
     scheduler,
     metrics: dict,
@@ -544,13 +587,14 @@ def save_checkpoint(
 ):
     checkpoint = {
         "epoch":     epoch,
-        "tokenizer": tokenizer.state_dict(),
         "model":     model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "metrics":   metrics,
         "config":    OmegaConf.to_container(cfg),
     }
+    if tokenizer is not None:
+        checkpoint["tokenizer"] = tokenizer.state_dict()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, path)
     log.info(f"Checkpoint saved: {path}")
@@ -558,7 +602,8 @@ def save_checkpoint(
 
 def load_checkpoint(path: str, tokenizer, model, optimizer, scheduler):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    tokenizer.load_state_dict(checkpoint["tokenizer"])
+    if tokenizer is not None and "tokenizer" in checkpoint:
+        tokenizer.load_state_dict(checkpoint["tokenizer"])
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
@@ -570,8 +615,8 @@ def load_checkpoint(path: str, tokenizer, model, optimizer, scheduler):
 # Train / Eval loop
 # ===========================================================================
 def train_one_epoch(
-    tokenizer:  CSITokenizer,
-    model:      CSITransformerPose,
+    tokenizer:  Optional[CSITokenizer],
+    model:      nn.Module,
     loader:     DataLoader,
     optimizer:  torch.optim.Optimizer,
     scheduler,
@@ -582,7 +627,8 @@ def train_one_epoch(
     epoch:      int,
 ) -> dict[str, float]:
 
-    tokenizer.train()
+    if tokenizer is not None:
+        tokenizer.train()
     model.train()
 
     lambda_action = cfg.loss.get("lambda_action", 0.0)
@@ -599,8 +645,11 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with amp.autocast(device_type=device.type, enabled=cfg.training.amp):
-            tokens    = tokenizer(csi)
-            out       = model(tokens)
+            if tokenizer is None:
+                out = model(csi)
+            else:
+                tokens = tokenizer(csi)
+                out = model(tokens)
 
             pred_dict = {
                 "coords":     out["coords"],
@@ -621,10 +670,10 @@ def train_one_epoch(
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(
-            list(tokenizer.parameters()) + list(model.parameters()) + list(loss_fn.parameters()),
-            max_norm=cfg.training.grad_clip,
-        )
+        clip_params = list(model.parameters()) + list(loss_fn.parameters())
+        if tokenizer is not None:
+            clip_params += list(tokenizer.parameters())
+        torch.nn.utils.clip_grad_norm_(clip_params, max_norm=cfg.training.grad_clip)
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -654,15 +703,16 @@ def train_one_epoch(
 
 @torch.no_grad()
 def eval_one_epoch(
-    tokenizer: CSITokenizer,
-    model:     CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model:     nn.Module,
     loader:    DataLoader,
     loss_fn:   RFPoseLoss,
     device:    torch.device,
     cfg:       DictConfig,
 ) -> dict[str, float]:
 
-    tokenizer.eval()
+    if tokenizer is not None:
+        tokenizer.eval()
     model.eval()
 
     mpjpe_fn    = MPJPE()
@@ -679,8 +729,11 @@ def eval_one_epoch(
         gt_coords = batch["coords"].to(device)
         gt_vis    = batch["vis"].to(device)
 
-        tokens = tokenizer(csi)
-        out    = model(tokens)
+        if tokenizer is None:
+            out = model(csi)
+        else:
+            tokens = tokenizer(csi)
+            out = model(tokens)
 
         pred_dict = {"coords": out["coords"], "vis_logits": out["vis_logits"]}
         gt_dict   = {"coords": gt_coords,     "vis": gt_vis}
@@ -744,24 +797,39 @@ def train(cfg: DictConfig) -> None:
 
     # Model
     tokenizer, model = build_model_and_tokenizer(cfg)
+    arch = cfg.model.get("arch", "transformer")
 
     # Load pretrained weights (Phase 2 full model OR Phase 1 SSL encoder)
     pretrained_from = cfg.training.get("pretrained_from", "")
-    ssl_ckpt = cfg.training.get("ssl_pretrained", "")
+    ssl_ckpt = cfg.training.get("ssl_pretrained", "") or cfg.model.get("ssl_checkpoint", "")
     freeze = cfg.training.get("freeze_encoder", False)
 
+    encoder_frozen = False
     if pretrained_from and Path(pretrained_from).exists():
         load_pretrained_full(tokenizer, model, pretrained_from, freeze_encoder=freeze)
+        encoder_frozen = freeze
     elif ssl_ckpt and Path(ssl_ckpt).exists():
-        load_ssl_pretrained(tokenizer, model, ssl_ckpt, freeze_encoder=freeze)
+        ssl_tokenizer = tokenizer if tokenizer is not None else model.tokenizer
+        load_ssl_pretrained(ssl_tokenizer, model, ssl_ckpt, freeze_encoder=freeze)
+        encoder_frozen = freeze
+    elif ssl_ckpt:
+        log.warning(f"SSL pretrained checkpoint not found: {ssl_ckpt}")
 
-    tokenizer = tokenizer.to(device)
+    if arch == "ssl_cnn" and freeze and not encoder_frozen:
+        _freeze_encoder(model.tokenizer, model)
+
+    if tokenizer is not None:
+        tokenizer = tokenizer.to(device)
     model     = model.to(device)
 
-    trainable_tok = sum(p.numel() for p in tokenizer.parameters() if p.requires_grad)
+    trainable_tok = sum(p.numel() for p in tokenizer.parameters() if p.requires_grad) if tokenizer is not None else 0
     trainable_mod = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log.info(f"Tokenizer params: {trainable_tok:,} (trainable)")
-    log.info(f"Model params:     {trainable_mod:,} (trainable)")
+    frozen_tok = sum(p.numel() for p in tokenizer.parameters() if not p.requires_grad) if tokenizer is not None else 0
+    frozen_mod = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    log.info(f"Tokenizer params: {trainable_tok:,} trainable | {frozen_tok:,} frozen")
+    log.info(f"Model params:     {trainable_mod:,} trainable | {frozen_mod:,} frozen")
+    if arch == "ssl_cnn":
+        log.info(f"Total params:     {trainable_mod:,} trainable | {frozen_mod:,} frozen")
 
     loss_fn = build_loss_fn(cfg).to(device)
 
@@ -847,10 +915,12 @@ def train(cfg: DictConfig) -> None:
                 break
 
         # Export ONNX
-        if not cfg.training.dry_run:
+        if not cfg.training.dry_run and arch == "transformer":
             log.info("Exporting model to ONNX...")
             _export_onnx(tokenizer, model, cfg, device)
             mlflow.log_artifact("checkpoints/model.onnx")
+        elif arch != "transformer":
+            log.info("Skipping ONNX export for model.arch=%s", arch)
 
         log.info(f"Training complete. Best MPJPE: {best_mpjpe:.4f}")
         mlflow.log_metric("best_mpjpe", best_mpjpe)
