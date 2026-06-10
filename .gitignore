@@ -29,6 +29,7 @@ scripts/setup_server.py
 # Next.js dashboard
 .next/
 dashboard/.next/
+outputs/
 
 # ko push
 ml/experiment_log.md

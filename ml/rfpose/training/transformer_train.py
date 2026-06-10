@@ -894,17 +894,19 @@ def train(cfg: DictConfig) -> None:
                 patience_counter = 0
                 best_ckpt        = "checkpoints/best.pt"
                 save_checkpoint(epoch, tokenizer, model, optimizer, scheduler, all_metrics, cfg, best_ckpt)
-                mlflow.log_artifact(best_ckpt)
+                mlflow.log_artifact(best_ckpt, artifact_path="checkpoints")
                 log.info(f"  New best MPJPE: {best_mpjpe:.4f}")
             else:
                 patience_counter += 1
                 log.info(f"  No improvement. Patience: {patience_counter}/{cfg.training.patience}")
 
             if epoch % cfg.training.save_every == 0:
+                epoch_ckpt = f"checkpoints/epoch_{epoch:03d}.pt"
                 save_checkpoint(
                     epoch, tokenizer, model, optimizer, scheduler,
-                    all_metrics, cfg, f"checkpoints/epoch_{epoch:03d}.pt",
+                    all_metrics, cfg, epoch_ckpt,
                 )
+                mlflow.log_artifact(epoch_ckpt, artifact_path="checkpoints")
 
             if patience_counter >= cfg.training.patience:
                 log.info(f"Early stopping tại epoch {epoch}")
