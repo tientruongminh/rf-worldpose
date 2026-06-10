@@ -1,0 +1,8 @@
+- training.dry_run=true
+- training.device=cpu
+- training.amp=false
+- training.epochs=1
+- training.batch_size=2
+- training.num_workers=0
+- training.log_every=1
+- mlflow.tracking_uri=file:/tmp/rfpose-mlruns

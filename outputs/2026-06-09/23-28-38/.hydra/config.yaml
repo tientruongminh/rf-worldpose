@@ -1,0 +1,66 @@
+data:
+  format: gold_npz
+  gold_dir: /tmp/rfpose-gold-smoke
+  n_subcarriers: 270
+  n_joints: 13
+  n_nodes: 1
+  window_size: 60
+  stride: 10
+  val_ratio: 0.2
+  augment: false
+  require_pose: false
+  require_action: false
+  datasets: null
+model:
+  patch_size: 6
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  ffn_mult: 4
+  predict_3d: true
+  causal_temporal: false
+  dropout: 0.1
+  num_actions: 28
+  arch: ssl_cnn
+  cnn_hidden_dim: 256
+  cnn_layers: 2
+  cnn_kernel_size: 3
+loss:
+  weighting_mode: uncertainty
+  lambda_coord: 1.0
+  lambda_vis: 0.5
+  lambda_bone: 0.3
+  lambda_temporal: 0.2
+  lambda_symmetry: 0.1
+  lambda_action: 0.5
+  coord_loss_type: smooth_l1
+training:
+  epochs: 1
+  batch_size: 2
+  lr: 0.0001
+  weight_decay: 0.0001
+  beta1: 0.9
+  beta2: 0.999
+  grad_clip: 1.0
+  warmup_epochs: 0
+  patience: 10
+  save_every: 5
+  log_every: 1
+  amp: false
+  num_workers: 0
+  seed: 42
+  device: cpu
+  resume_from: ''
+  ssl_pretrained: ./csi_encoder_pretrained.pt
+  pretrained_from: ''
+  freeze_encoder: true
+  dry_run: true
+  checkpoint_dir: ''
+mlflow:
+  tracking_uri: sqlite:////tmp/rfpose-mlflow-smoke.db
+  experiment_name: rf-worldpose-transformer
+  run_name: ssl-cnn-v1

@@ -1,0 +1,57 @@
+# configs/transformer.yaml
+
+data:
+  gold_dir: "data/gold"
+  n_subcarriers: 114
+  n_joints: 17
+  n_nodes: 1                   # 1 = single ESP32, 4 = multi-node
+  window_size: 100
+  stride: 50
+  val_ratio: 0.2
+  augment: true
+
+model:
+  patch_size: 6
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  ffn_mult: 4
+  predict_3d: true
+  causal_temporal: false
+  dropout: 0.1
+
+loss:
+  lambda_coord: 1.0
+  lambda_vis: 0.5
+  lambda_bone: 0.3
+  lambda_temporal: 0.2
+  lambda_symmetry: 0.1
+  coord_loss_type: "smooth_l1"
+
+training:
+  epochs: 100
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  grad_clip: 1.0
+  warmup_epochs: 5
+  patience: 20
+  save_every: 10
+  log_every: 10
+  amp: true
+  num_workers: 4
+  seed: 42
+  device: "cuda"
+  resume_from: ""
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "transformer-v1"

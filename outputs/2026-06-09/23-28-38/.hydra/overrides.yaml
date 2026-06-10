@@ -1,0 +1,11 @@
+- data.gold_dir=/tmp/rfpose-gold-smoke
+- data.augment=false
+- training.dry_run=true
+- training.device=cpu
+- training.amp=false
+- training.epochs=1
+- training.batch_size=2
+- training.num_workers=0
+- training.log_every=1
+- training.warmup_epochs=0
+- mlflow.tracking_uri=sqlite:////tmp/rfpose-mlflow-smoke.db

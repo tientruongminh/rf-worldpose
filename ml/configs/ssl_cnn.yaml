@@ -1,0 +1,22 @@
+defaults:
+  - transformer_gold
+  - _self_
+
+model:
+  arch: ssl_cnn
+  cnn_hidden_dim: 256
+  cnn_layers: 2
+  cnn_kernel_size: 3
+  dropout: 0.1
+
+training:
+  ssl_pretrained: "./csi_encoder_pretrained.pt"
+  freeze_encoder: true
+  epochs: 30
+  batch_size: 32
+  lr: 1.0e-4
+  patience: 10
+
+mlflow:
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "ssl-cnn-v1"
