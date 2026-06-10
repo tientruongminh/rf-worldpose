@@ -18,7 +18,10 @@ CONFIG_TO_MODULE = {
     "demo": "rfpose.training.transformer_train",
     "eval_demo": "rfpose.evaluation.eval_job",
     "vit2d_wipose_eagle": "rfpose.training.train_vit2d",
-    "vit2d_mmfi_eagle": "rfpose.training.train_vit2d"
+    "vit2d_mmfi_eagle": "rfpose.training.train_vit2d",
+    "vit2d_mmfi_augmentation": "rfpose.training.train_vit2d_augmentation",
+    "vit2d_wipose_augmentation": "rfpose.training.train_vit2d_augmentation",
+    "vit2d_full_augmentation": "rfpose.training.train_vit2d_augmentation"
 }
 
 

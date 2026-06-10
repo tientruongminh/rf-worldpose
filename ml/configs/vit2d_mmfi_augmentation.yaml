@@ -1,0 +1,32 @@
+# overrides for transformer_gold.yaml
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-unified-v2"
+  datasets: ["mmfi"]
+  
+model:
+  patch_size: [6, 10]  # First value is freq_patch, second is ignored but kept for tracking
+  d_model: 128         # Reduced capacity to prevent overfitting
+  spatial_heads: 8
+  n_spatial_layers: 4  # Total layers for the single ViT Encoder
+  n_decoder_layers: 3
+  dropout: 0.1
+
+training:
+  epochs: 150
+  batch_size: 32       # Increase to 64 if GPU memory allows
+  lr: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+
+augmentation:
+  prob: 0.5
+  time_mask: 12
+  freq_mask: 20
+  
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-vit2d-augmentation"
+  run_name: "vit2d-patching-huong-mmfi-augmentation"
