@@ -29,3 +29,4 @@ scripts/setup_server.py
 # Next.js dashboard
 .next/
 dashboard/.next/
+outputs/

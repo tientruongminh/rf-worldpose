@@ -18,5 +18,6 @@ training:
   patience: 10
 
 mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
   experiment_name: "rf-worldpose-transformer"
   run_name: "ssl-cnn-v1"
