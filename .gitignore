@@ -30,3 +30,8 @@ scripts/setup_server.py
 .next/
 dashboard/.next/
 outputs/
+
+# ko push
+ml/experiment_log.md
+ml/rfpose/data/label_maps.json
+ml/rfpose/data/manifest.json
