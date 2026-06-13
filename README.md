@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🌐 RF-WorldPose
-
-### WiFi CSI → 3D Human Pose & Action Recognition
-
-*Sensing human motion through the wireless channel — no camera required at inference time.*
+<p align="center">
+  <a href="docs/images/rf-worldpose-logo.png">
+    <img src="docs/images/rf-worldpose-logo.png" alt="RF-WorldPose — WiFi CSI to 3D human pose and action recognition" width="520"/>
+  </a>
+</p>
 
 <br>
 
@@ -493,7 +493,7 @@ This repository is an academic research project. License terms are not yet final
 
 <br>
 
-**🌐 RF-WorldPose** — *sensing human motion through the wireless channel*
+<img src="docs/images/rf-worldpose-logo.png" alt="RF-WorldPose" width="280"/>
 
 <br>
 
