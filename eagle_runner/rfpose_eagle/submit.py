@@ -10,7 +10,6 @@ from rfpose_eagle.registry import get_preset, resolve_train_module
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "templates" / "train_eagle.sbatch"
 
-
 @dataclass(frozen=True)
 class EagleJobSpec:
     job_id: str
