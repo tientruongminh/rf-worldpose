@@ -1,10 +1,10 @@
 """
 EDA — RF-WorldPose Bronze Datasets: MMFi_Dataset
 
-Gồm 8 biểu đồ:
+Gồm 7 biểu đồ:
   1. mmfi_cross_modal_dynamics.png (Pose vs WiFi của hành động A06)
-  2-8. mmfi_progression_{A02|A06|A12|A17|A19|A20|A26}.png 
-  Chest expansion|Mark time|Squat|Waving hand (L)|Picking up|Throwing (L)|Jumping up
+  2-7. mmfi_progression_{A02|A06|A12|A17|A20|A26}.png
+  Chest expansion|Mark time|Squat|Waving hand (L)|Throwing (L)|Jumping up
 
 Đường dẫn từ configs.py.
 Result saved: /results_mmfi
@@ -81,7 +81,7 @@ def main():
     print(f"  [INFO] Thư mục Dữ liệu: {working_data_dir}")
     print(f"  [INFO] Thư mục Đầu ra: {OUTPUT_DIR}")
 
-    target_actions = ['A02', 'A06', 'A12', 'A17', 'A19', 'A20', 'A26']
+    target_actions = ['A02', 'A06', 'A12', 'A17', 'A20', 'A26']
     sample_dict = {}
     
     # Tìm kiếm ngẫu nhiên 1 file đại diện cho từng hành động
