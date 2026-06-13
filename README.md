@@ -411,7 +411,6 @@ rf-worldpose/
 ├── gateway/               # Edge CSI gateway (Rust)
 ├── infra/docker-compose/  # Local dev stack
 ├── docs/                  # Architecture, API, system docs
-└── notebooks/             # Exploratory analysis
 ```
 
 ---
