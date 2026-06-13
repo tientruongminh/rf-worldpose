@@ -1,0 +1,23 @@
+# Fine-tune WiMose Proto1 best pose checkpoint → multi-task pose + action
+# Loads: checkpoints/wimose-mmfi17j-proto1-v1/best.pt
+defaults:
+  - wimose_mmfi17j_proto1_eagle
+  - _self_
+
+model:
+  num_actions: 28
+
+loss:
+  lambda_action: 0.5
+
+training:
+  epochs: 60
+  lr: 5.0e-4
+  patience: 20
+  warmup_epochs: 3
+  pretrained_from: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-proto1-v1/best.pt"
+  freeze_backbone: true
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-proto1-action-v1"
+
+mlflow:
+  run_name: "wimose-mmfi17-proto1-action-finetune-v1"

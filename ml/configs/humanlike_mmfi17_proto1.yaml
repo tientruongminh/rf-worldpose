@@ -1,0 +1,66 @@
+# Shared MM-Fi Protocol-1 data config — same pipeline as WiMose winning runs.
+# Apply splits first: scripts/assign_subject_splits.py --protocol 1
+defaults:
+  - transformer_gold
+  - _self_
+
+data:
+  format: "gold_npz"
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-humanlike-v2-proto1"
+  datasets: ["mmfi"]
+  n_subcarriers: 342
+  n_joints: 17
+  n_nodes: 1
+  window_size: 60
+  stride: 10
+  val_ratio: 0.2
+  val_splits: ["val"]
+  augment: true
+  require_pose: true
+  require_action: false
+  normalize_csi: true
+  center_pose: true
+  root_joint: 0
+
+model:
+  patch_size: 6
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  dropout: 0.1
+  num_actions: 28
+
+loss:
+  weighting_mode: "static"
+  lambda_coord: 1.0
+  lambda_vis: 0.0
+  lambda_bone: 0.2
+  lambda_temporal: 0.1
+  lambda_symmetry: 0.05
+  lambda_action: 0.0
+  coord_loss_type: "smooth_l1"
+
+training:
+  device: "cuda"
+  epochs: 120
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+  save_every: 10
+  log_every: 50
+  amp: true
+  num_workers: 2
+  seed: 42
+  ssl_pretrained: ""
+  freeze_encoder: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-humanlike"
+  run_name: "humanlike-mmfi17-proto1"

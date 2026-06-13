@@ -1,0 +1,54 @@
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-humanlike-v2"
+  datasets: ["wipose"]
+  n_subcarriers: 1350
+  n_joints: 18
+  window_size: 60
+  augment: true
+  require_pose: true
+  require_action: false
+
+model:
+  patch_size: 30
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  dropout: 0.1
+  num_actions: 28
+
+loss:
+  weighting_mode: "static"
+  lambda_coord: 1.0
+  lambda_vis: 0.0
+  lambda_bone: 0.2
+  lambda_temporal: 0.1
+  lambda_symmetry: 0.05
+  lambda_action: 0.0
+  coord_loss_type: "smooth_l1"
+
+training:
+  device: "cuda"
+  epochs: 80
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  patience: 20
+  save_every: 5
+  log_every: 50
+  amp: true
+  num_workers: 8
+  dry_run: false
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/humanlike-wipose18-v2"
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-humanlike"
+  run_name: "humanlike-wipose18-v2"

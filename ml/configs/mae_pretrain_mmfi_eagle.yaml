@@ -1,0 +1,49 @@
+# WiMAE pretraining on MM-Fi CSI (no pose labels needed)
+# Phase 1 of DT-Pose-style pipeline:
+#   Pretrain → save encoder → fine-tune diffusion decoder with pose supervision
+#
+# Patch grid: 342÷18=19 rows × 60÷6=10 cols = 190 tokens
+# Mask 80% → encoder sees only 38 tokens, must learn rich features to reconstruct
+# ~1.5 days on 4×H100 at 200 epochs
+
+data:
+  gold_dir: "/tmp/rfpose_gold_mmfi_mae_SLURM_JOB_ID"   # overridden by sbatch
+  datasets: ["mmfi"]
+  n_joints: 17
+  n_subcarriers: 342
+  window_size: 60
+  augment: false          # no augmentation during pretraining to keep targets stable
+  require_pose: false     # MAE doesn't need GT pose
+  normalize_csi: true
+
+model:
+  mask_ratio: 0.80
+  patch_h: 18             # 342/18 = 19 patches along subcarrier axis
+  patch_w: 6              # 60/6  = 10 patches along time axis
+  # Encoder (kept after pretraining)
+  encoder_dim: 384
+  encoder_layers: 6
+  encoder_heads: 6
+  # Decoder (thrown away after pretraining)
+  decoder_dim: 256
+  decoder_layers: 4
+  decoder_heads: 4
+  dropout: 0.1
+
+training:
+  device: "cuda"
+  epochs: 200
+  batch_size: 64          # larger batch = more stable reconstruction loss
+  lr: 1.5e-4              # AdamW standard for ViT MAE
+  weight_decay: 0.05
+  warmup_epochs: 10
+  save_every: 20
+  amp: true
+  num_workers: 4
+  seed: 42
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimae-mmfi-pretrain-v1"
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-mae"
+  run_name: "wimae-mmfi-pretrain-v1"

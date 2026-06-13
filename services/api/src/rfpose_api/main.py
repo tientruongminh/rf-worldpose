@@ -13,7 +13,6 @@ app.include_router(sessions.router)
 app.include_router(datasets.router)
 app.include_router(training.router)
 app.include_router(models.router)
-app.include_router(helios.router)
 app.include_router(hpc.router)
 
 

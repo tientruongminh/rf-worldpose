@@ -1,0 +1,24 @@
+# Mai Thu Hương — CSIViT2DPose (train_vit2d.py)
+# Same Proto-1 MM-Fi data as WiMose baseline.
+defaults:
+  - humanlike_mmfi17_proto1
+  - _self_
+
+model:
+  patch_size: [6, 10]
+  d_model: 128
+  spatial_heads: 8
+  n_spatial_layers: 4
+  n_decoder_layers: 3
+  dropout: 0.1
+
+training:
+  epochs: 120
+  batch_size: 32
+  lr: 1.0e-4
+  patience: 30
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/vit2d-mmfi17-proto1-v1"
+
+mlflow:
+  experiment_name: "rf-worldpose-vit2d"
+  run_name: "vit2d-huong-mmfi17-proto1-v1"

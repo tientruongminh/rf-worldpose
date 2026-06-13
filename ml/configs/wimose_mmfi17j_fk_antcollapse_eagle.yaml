@@ -1,0 +1,51 @@
+# Wi-Mose MM-Fi Proto1 — FK head + anti-mean-collapse loss
+#
+# Architecture: ResNet backbone → quaternion FK decoder (bone lengths fixed)
+# Loss: base + bone + collapse (std shortfall) + spread (pairwise distance)
+#
+# Target metrics on val:
+#   std_ratio → 1.0  (pred batch variance matches GT)
+#   spread_ratio → 1.0  (pred pairwise distance matches GT)
+
+data:
+  gold_dir: "/tmp/rfpose_gold_mmfi_fk_SLURM_JOB_ID"
+  datasets: ["mmfi"]
+  n_joints: 17
+  n_subcarriers: 342
+  window_size: 60
+  augment: true
+  require_pose: true
+  normalize_csi: true
+  center_pose: true
+  root_joint: 0
+
+model:
+  use_fk_head: true
+  use_gcn_head: false
+
+loss:
+  huber_delta: 0.75
+  lambda_bone: 0.3
+  lambda_sym: 0.05
+  lambda_div: 0.05
+  lambda_collapse: 0.5    # hinge: penalise pred_std << gt_std
+  lambda_spread: 0.3      # penalise pred pairwise dist << gt dist
+
+training:
+  device: "cuda"
+  epochs: 120
+  batch_size: 32
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+  save_every: 10
+  amp: true
+  num_workers: 2
+  seed: 42
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-fk-antcollapse-v1"
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-wimose"
+  run_name: "wimose-mmfi17j-fk-antcollapse-v1"
