@@ -1,30 +1,47 @@
 <div align="center">
 
-# RF-WorldPose
+# 🌐 RF-WorldPose
 
-**WiFi CSI → 3D human pose & action recognition**
+### WiFi CSI → 3D Human Pose & Action Recognition
 
-End-to-end research platform: ESP32 CSI capture → Bronze/Silver/Gold data lake → PyTorch training on HPC → MLflow experiment tracking → API & ONNX inference.
-
-[Quick Start](#quick-start) · [Models](#models--training-presets) · [Results](#benchmark-snapshot) · [API](#api--services) · [Docs](#documentation)
+*Sensing human motion through the wireless channel — no camera required at inference time.*
 
 <br>
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](ml/pyproject.toml)
-[![PyTorch](https://img.shields.io/badge/pytorch-required-ee4c2c.svg)](ml/pyproject.toml)
-[![Docker](https://img.shields.io/badge/docker-compose-supported-2496ed.svg)](infra/docker-compose/docker-compose.yml)
-[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-green.svg)](.github/workflows/ci.yml)
+[![📊 Report PDF](https://img.shields.io/badge/📊_Báo_cáo_đầy_đủ-PDF-ff6b35?style=for-the-badge)](Report/14Teams_for_final_project_report.pdf)
+[![Pose 173.6mm](https://img.shields.io/badge/Pose_MPJPE-173.6_mm_test-2ea043?style=for-the-badge)](#benchmark-snapshot)
+[![Action 91%](https://img.shields.io/badge/Action_Acc-91.5%25_test-1f6feb?style=for-the-badge)](#benchmark-snapshot)
+
+<br>
+
+[📊 **Report**](Report/14Teams_for_final_project_report.pdf) · [🚀 Quick Start](#quick-start) · [🧠 Models](#models--training-presets) · [📈 Results](#benchmark-snapshot) · [🏗️ System](#kiến-trúc-hệ-thống) · [🧬 Model](#kiến-trúc-model) · [📦 Data](#kiến-trúc-pipeline-dữ-liệu) · [🔌 API](#api--services)
+
+<br>
+
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](ml/pyproject.toml)
+[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](ml/pyproject.toml)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](services/api/)
+[![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?logo=docker&logoColor=white)](infra/docker-compose/docker-compose.yml)
+[![MLflow](https://img.shields.io/badge/MLflow-0194E2?logo=mlflow&logoColor=white)](docs/mlops.md)
+[![CI](https://img.shields.io/badge/GitHub_Actions-passing-2088FF?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
 </div>
+
+> [!IMPORTANT]
+> **📊 Báo cáo đầy đủ:** tải PDF **[`14Teams_for_final_project_report.pdf`](Report/14Teams_for_final_project_report.pdf)** trong [`Report/`](Report/). Tài liệu kỹ thuật markdown → [`docs/`](docs/).
 
 ---
 
 ## Table of Contents
 
+- [📊 Report (PDF)](#-report-pdf)
 - [Overview](#overview)
 - [Benchmark Snapshot](#benchmark-snapshot)
 - [Features](#features)
-- [Architecture](#architecture)
+- [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
+- [Kiến trúc pipeline dữ liệu](#kiến-trúc-pipeline-dữ-liệu)
+- [Kiến trúc model](#kiến-trúc-model)
+- [Tech stack & repo map](#tech-stack--repo-map)
 - [Quick Start](#quick-start)
 - [Models & Training Presets](#models--training-presets)
 - [Evaluation & Figures](#evaluation--figures)
@@ -34,6 +51,16 @@ End-to-end research platform: ESP32 CSI capture → Bronze/Silver/Gold data lake
 - [Troubleshooting](#troubleshooting)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
+
+---
+
+## 📊 Report (PDF)
+
+| File | Mô tả |
+|------|-------|
+| [**📄 14Teams_for_final_project_report.pdf**](Report/14Teams_for_final_project_report.pdf) | Báo cáo tổng hợp dự án cuối kỳ — team 14, kết quả & kiến trúc đầy đủ |
+
+Tài liệu markdown chi tiết (research log, appendix) → [`docs/`](docs/).
 
 ---
 
@@ -55,9 +82,12 @@ Training presets are registered in **`eagle_runner/rfpose_eagle/registry.py`** �
 
 ## Benchmark Snapshot
 
-Numbers below come from held-out evaluation on Eagle (MM-Fi Protocol 1 / unified-v2). See [`docs/research-log-30d-2026-05-14_to_2026-06-13.md`](docs/research-log-30d-2026-05-14_to_2026-06-13.md) for full experiment history.
+Numbers below come from held-out evaluation on Eagle (MM-Fi Protocol 1 / unified-v2). Chi tiết → [research log](docs/research-log-30d-2026-05-14_to_2026-06-13.md) · [báo cáo PDF](Report/14Teams_for_final_project_report.pdf).
 
 ### Pose (MPJPE ↓)
+
+> [!TIP]
+> WiMose Proto1 đạt **173.6 mm test MPJPE** trên 1,104 mẫu held-out. Chi tiết → [research log](docs/research-log-30d-2026-05-14_to_2026-06-13.md) · [báo cáo PDF](Report/14Teams_for_final_project_report.pdf).
 
 | Model | Split | *N* | MPJPE | PA-MPJPE | Protocol |
 |-------|------:|----:|------:|---------:|----------|
@@ -80,38 +110,101 @@ Numbers below come from held-out evaluation on Eagle (MM-Fi Protocol 1 / unified
 
 ## Features
 
-- **Multi-model training** — WiMoseNet (CNN), CSITransformerPoseRootRel, CSIViT2D, SSL/MAE pretraining, GCN/FK ablations
-- **Gold NPZ datasets** — structured CSI windows, pose/action labels, train/val/test splits, CSI & pose normalization
-- **HPC integration** — Slurm jobs on Eagle via `eagle_runner` + `scripts/eagle_submit_train.sh`
-- **MLOps** — MLflow metrics, checkpoints, artifact tracking
-- **Control-plane API** — job registry, HPC submit/refresh/cancel, dataset & model metadata
-- **Inference service** — ONNX runtime, NATS realtime stream, pose + action outputs
-- **Reproducible eval** — Slurm eval jobs, JSON metrics, visualization scripts
+| | Capability |
+|---|------------|
+| 🧠 | **Multi-model training** — WiMoseNet, RootRel Transformer, CSIViT2D, SSL/MAE, GCN/FK ablations |
+| 📦 | **Gold NPZ datasets** — CSI windows, pose/action labels, train/val/test splits |
+| 🦅 | **HPC integration** — Slurm on Eagle via `eagle_runner` + `eagle_submit_train.sh` |
+| 📈 | **MLOps** — MLflow metrics, checkpoints, artifact tracking |
+| 🎛️ | **Control-plane API** — job registry, HPC submit/refresh/cancel |
+| ⚡ | **Inference service** — ONNX runtime, NATS realtime, pose + action outputs |
+| 🔬 | **Reproducible eval** — Slurm eval jobs, JSON metrics, viz scripts |
 
 ---
 
-## Architecture
+## Kiến trúc hệ thống
+
+Portal, API gateway, microservices (NATS), Dagster ETL, Eagle/Helios HPC, MLflow, S3/MinIO, inference service.
 
 <p align="center">
-  <a href="docs/images/rf-worldpose-architecture.png">
-    <img src="docs/images/rf-worldpose-architecture.png" alt="RF-WorldPose — Full Architecture &amp; Tech Stack" width="100%"/>
+  <a href="docs/images/platform-architecture.png">
+    <img src="docs/images/platform-architecture.png" alt="RF-WorldPose — Kiến trúc hệ thống" width="100%"/>
   </a>
   <br/>
-  <sub><b>RF-WorldPose — Full Architecture &amp; Tech Stack</b> · RF-based 3D human pose estimation end-to-end</sub>
+  <sub><b>Kiến trúc hệ thống</b> — Users → Portal/API → Core services → Data lake → HPC training → MLflow → Inference</sub>
 </p>
-
-The platform spans **edge capture → medallion data lake → HPC training → MLOps → serving**:
 
 | Block | Components |
 |-------|------------|
-| **Users & access** | Web portal (dashboard, jobs, experiments, models), REST/WebSocket inference API |
-| **Core services** | Auth, config/model registry, job service, HPC adapter (Eagle/Helios), MLflow, logs — via **NATS** message bus |
-| **Data pipeline** | Dagster ETL: Raw (MM-Fi, WiPose, WiAR) → **Bronze** (Parquet/S3) → **Silver** → **Silver-Unified** → **Gold** (`X.memmap`, pose/action labels, train/val/test) |
-| **ML training** | PyTorch on Eagle H100: loader → preprocess → backbone + pose/action heads → MPJPE + CE → AdamW → checkpoints |
-| **Evaluation** | `eval_v2.py` → MPJPE, PA-MPJPE, action accuracy/F1 → JSON/CSV + plots → MLflow artifacts |
-| **Infrastructure** | Docker Compose, GitHub Actions CI/CD, Prometheus + Grafana + Loki, PostgreSQL + S3/MinIO |
+| **Users & access** | Web portal, REST/WebSocket inference API, RBAC |
+| **Core services** | Auth, config/model registry, job service, HPC adapter, MLflow — qua **NATS** |
+| **ML training** | PyTorch trên Eagle H100, checkpoints, eval → MLflow artifacts |
+| **Infrastructure** | Docker Compose, GitHub Actions, Prometheus + Grafana, PostgreSQL + S3 |
 
-### Tech stack
+---
+
+## Kiến trúc pipeline dữ liệu
+
+Medallion architecture (Bronze → Silver → Gold): MM-Fi, WiPose, WiAR → Parquet → memmap → PyTorch Dataset.
+
+<p align="center">
+  <a href="docs/images/data-pipeline-medallion.png">
+    <img src="docs/images/data-pipeline-medallion.png" alt="RF-WorldPose — Kiến trúc pipeline dữ liệu" width="100%"/>
+  </a>
+  <br/>
+  <sub><b>Kiến trúc pipeline dữ liệu</b> — Raw → Bronze → Silver → Gold → Training · Split Protocol 1: 10356 / 1500 / 1104</sub>
+</p>
+
+| Stage | Output | Storage |
+|-------|--------|---------|
+| **Bronze** | Raw CSI Parquet (per session) | S3 / `/data/bronze/` |
+| **Silver** | Cleaned, unified schema | S3 / `/data/silver/` |
+| **Gold** | `X.memmap`, labels, `stats.json`, splits | S3 / `/data/gold/` |
+| **Training** | PyTorch DataLoader + augmentation | Eagle HPC |
+
+Orchestration: **Dagster** · Quality checks · **MLflow** tracking.
+
+---
+
+## Kiến trúc model
+
+Hai họ model chính trong pipeline: **WiMose Proto1 CNN** (pose SOTA) và **WiMose multitask encoder** (pose + action).
+
+### WiMose Proto1 — CNN pose (157.7 mm val MPJPE)
+
+ResNet-style backbone 13 blocks, WiMoseLoss, 17 joints H36M, config `wimose_mmfi17j_proto1_eagle`.
+
+<p align="center">
+  <a href="docs/images/wimose-proto1-cnn-architecture.png">
+    <img src="docs/images/wimose-proto1-cnn-architecture.png" alt="WiMose Proto1 CNN — Kiến trúc model pose" width="100%"/>
+  </a>
+  <br/>
+  <sub><b>Kiến trúc model — WiMose Proto1 CNN</b> · val MPJPE <b>157.7 mm</b> · test <b>173.6 mm</b></sub>
+</p>
+
+### WiMose multitask — dual-axis attention encoder
+
+12 WiMose blocks (subcarrier + temporal attention), pose head (17×3) + action head (28 classes), loss `L_pose + λ·L_action`.
+
+<p align="center">
+  <a href="docs/images/wimose-multitask-architecture.png">
+    <img src="docs/images/wimose-multitask-architecture.png" alt="WiMose Multitask — Kiến trúc model encoder" width="100%"/>
+  </a>
+  <br/>
+  <sub><b>Kiến trúc model — WiMose multitask</b> · Pose head + Action head · RootRel action ~91% trên unified-v2</sub>
+</p>
+
+| Model | Task | Best metric | Preset |
+|-------|------|-------------|--------|
+| **WiMose Proto1 CNN** | pose | **173.6 mm test MPJPE** | `wimose_mmfi17j_proto1_eagle` |
+| **RootRel Transformer** | multitask | **91.5% test action acc** | `rootrel_mmfi_eagle` |
+| WiMose multitask encoder | pose + action | ablation / research | various configs |
+
+---
+
+## Tech stack & repo map
+
+The platform spans **edge capture → medallion data lake → HPC training → MLOps → serving**:
 
 | Area | Technologies |
 |------|--------------|
@@ -304,6 +397,7 @@ Returns `action` logits and `pose_3d` / `pose_2d` when the exported ONNX head su
 
 ```text
 rf-worldpose/
+├── Report/                # 📊 Báo cáo PDF (14Teams final report)
 ├── ml/                    # PyTorch models, configs, training, eval
 │   ├── configs/           # Hydra YAML
 │   └── rfpose/
@@ -316,7 +410,7 @@ rf-worldpose/
 ├── firmware/              # ESP32 CSI node
 ├── gateway/               # Edge CSI gateway (Rust)
 ├── infra/docker-compose/  # Local dev stack
-├── docs/                  # Architecture, API, research logs
+├── docs/                  # Architecture, API, system docs
 └── notebooks/             # Exploratory analysis
 ```
 
@@ -356,11 +450,13 @@ CI runs on push/PR to `main` and `develop` (see [`.github/workflows/ci.yml`](.gi
 
 | Resource | Path |
 |----------|------|
+| **📊 Final report (PDF)** | [`Report/14Teams_for_final_project_report.pdf`](Report/14Teams_for_final_project_report.pdf) |
 | ML training guide (Vietnamese) | [`ml/README.md`](ml/README.md) |
 | System overview (Vietnamese) | [`docs/system-overview-vi.md`](docs/system-overview-vi.md) |
 | Architecture | [`docs/architecture.md`](docs/architecture.md) |
 | API reference | [`docs/api.md`](docs/api.md) |
 | Research log (30 days) | [`docs/research-log-30d-2026-05-14_to_2026-06-13.md`](docs/research-log-30d-2026-05-14_to_2026-06-13.md) |
+| Team report (markdown) | [`docs/report-team-full-2026-05-14_to_2026-06-13.md`](docs/report-team-full-2026-05-14_to_2026-06-13.md) |
 | Datasets & models | [`docs/datasets-training-model.md`](docs/datasets-training-model.md) |
 | ESP32 firmware | [`firmware/esp32-csi-node/README.md`](firmware/esp32-csi-node/README.md) |
 
@@ -396,6 +492,12 @@ This repository is an academic research project. License terms are not yet final
 
 <div align="center">
 
-**RF-WorldPose** — sensing human motion through the wireless channel.
+<br>
+
+**🌐 RF-WorldPose** — *sensing human motion through the wireless channel*
+
+<br>
+
+[![📊 Báo cáo PDF](https://img.shields.io/badge/📊_Báo_cáo_đầy_đủ-PDF-ff6b35?style=for-the-badge)](Report/14Teams_for_final_project_report.pdf)
 
 </div>
