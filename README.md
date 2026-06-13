@@ -1,219 +1,268 @@
+<div align="center">
+
 # RF-WorldPose
 
-RF-WorldPose is a research and platform codebase for WiFi CSI human sensing. It
-turns wireless channel state information into ML-ready datasets, trains pose and
-action models on HPC, tracks experiments in MLflow, and exposes backend services
-for dataset, training, model and inference operations.
+**WiFi CSI → 3D human pose & action recognition**
 
-The current research conclusion is:
+End-to-end research platform: ESP32 CSI capture → Bronze/Silver/Gold data lake → PyTorch training on HPC → MLflow experiment tracking → API & ONNX inference.
 
-- **Pose regression:** use the single-task **WiMose Proto1** pipeline on MM-Fi
-  Protocol 1. Current held-out test result: **173.6 mm MPJPE / 157.1 mm
-  PA-MPJPE** on 1,104 test samples.
-- **Action classification:** use the **RootRel multitask/action** pipeline when
-  action labels are the goal. RootRel reaches about **91% accuracy and macro-F1**
-  on unified-v2, but its pose regression is weaker than WiMose.
+[Quick Start](#quick-start) · [Models](#models--training-presets) · [Results](#benchmark-snapshot) · [API](#api--services) · [Docs](#documentation)
 
-Do not compare numbers across protocols without checking dataset version,
-skeleton, split and preprocessing. The repo now uses `rfpose_eagle.registry` as
-the canonical source for model/config submit presets.
+<br>
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](ml/pyproject.toml)
+[![PyTorch](https://img.shields.io/badge/pytorch-required-ee4c2c.svg)](ml/pyproject.toml)
+[![Docker](https://img.shields.io/badge/docker-compose-supported-2496ed.svg)](infra/docker-compose/docker-compose.yml)
+[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-green.svg)](.github/workflows/ci.yml)
+
+</div>
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Benchmark Snapshot](#benchmark-snapshot)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Models & Training Presets](#models--training-presets)
+- [Evaluation & Figures](#evaluation--figures)
+- [API & Services](#api--services)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+
+---
+
+## Overview
+
+**RF-WorldPose** estimates **3D body pose** and **activity labels** from **WiFi Channel State Information (CSI)** — no camera required at inference time. The repository is both a **research codebase** (multiple model families, ablations, thesis artifacts) and a **platform skeleton** (data ETL, HPC job submission, control-plane API, inference service).
+
+**Current research takeaway** (protocol-specific — do not mix numbers blindly):
+
+| Goal | Recommended pipeline | Notes |
+|------|---------------------|--------|
+| **Pose (MM-Fi)** | `wimose_mmfi17j_proto1_eagle` — **WiMoseNet Proto1** | Single-task CNN; best held-out test on Protocol 1 |
+| **Action** | `rootrel_mmfi_eagle` — **CSITransformerPoseRootRel** | Multitask Transformer on `unified-v2`; ~91% accuracy |
+| **Pretraining** | `ssl_eagle` / MAE experiments | Encoder init for Transformer family |
+
+Training presets are registered in **`eagle_runner/rfpose_eagle/registry.py`** — the single source of truth for submit scripts and the API.
+
+---
+
+## Benchmark Snapshot
+
+Numbers below come from held-out evaluation on Eagle (MM-Fi Protocol 1 / unified-v2). See [`docs/research-log-30d-2026-05-14_to_2026-06-13.md`](docs/research-log-30d-2026-05-14_to_2026-06-13.md) for full experiment history.
+
+### Pose (MPJPE ↓)
+
+| Model | Split | *N* | MPJPE | PA-MPJPE | Protocol |
+|-------|------:|----:|------:|---------:|----------|
+| **WiMose Proto1** | val | 1,500 | **157.3 mm** | 147.5 mm | MM-Fi Protocol 1 |
+| **WiMose Proto1** | test | 1,104 | **173.6 mm** | 157.1 mm | MM-Fi Protocol 1 |
+| RootRel | val | 1,296 | 306.6 mm | 216.4 mm | unified-v2 |
+| RootRel | test | 1,296 | 310.5 mm | 216.3 mm | unified-v2 |
+
+### Action (accuracy ↑)
+
+| Model | Split | Accuracy | Macro-F1 | Protocol |
+|-------|------:|---------:|---------:|----------|
+| **RootRel multitask** | val | **91.28%** | 90.95% | unified-v2 |
+| **RootRel multitask** | test | **91.51%** | 91.37% | unified-v2 |
+| WiMose action head (Proto1) | val | ~18–19% | low | ≈ majority baseline |
+
+> **WiMose Proto1** is the strongest **pose** model under MM-Fi Protocol 1. **RootRel** is the strongest **action** model on unified-v2. Proto1 action fine-tuning (frozen backbone) has not beaten the majority class.
+
+---
+
+## Features
+
+- **Multi-model training** — WiMoseNet (CNN), CSITransformerPoseRootRel, CSIViT2D, SSL/MAE pretraining, GCN/FK ablations
+- **Gold NPZ datasets** — structured CSI windows, pose/action labels, train/val/test splits, CSI & pose normalization
+- **HPC integration** — Slurm jobs on Eagle via `eagle_runner` + `scripts/eagle_submit_train.sh`
+- **MLOps** — MLflow metrics, checkpoints, artifact tracking
+- **Control-plane API** — job registry, HPC submit/refresh/cancel, dataset & model metadata
+- **Inference service** — ONNX runtime, NATS realtime stream, pose + action outputs
+- **Reproducible eval** — Slurm eval jobs, JSON metrics, visualization scripts
+
+---
 
 ## Architecture
 
-```text
-CSI / dataset sources
-  -> Bronze / Silver / Gold ETL
-  -> ML-ready memmap/parquet datasets
-  -> PyTorch training on Eagle HPC via Slurm
-  -> MLflow metrics + artifacts + checkpoints
-  -> evaluation reports + thesis figures
-  -> API control plane + inference service
-```
+<p align="center">
+  <a href="docs/images/rf-worldpose-architecture.png">
+    <img src="docs/images/rf-worldpose-architecture.png" alt="RF-WorldPose — Full Architecture &amp; Tech Stack" width="100%"/>
+  </a>
+  <br/>
+  <sub><b>RF-WorldPose — Full Architecture &amp; Tech Stack</b> · RF-based 3D human pose estimation end-to-end</sub>
+</p>
 
-| Layer | Path | Purpose |
-| --- | --- | --- |
-| ML models and training | `ml/rfpose/` | WiMose, RootRel, ViT2D, SSL, eval scripts |
-| Training configs | `ml/configs/` | Hydra YAML configs used by Slurm jobs |
-| HPC submitter | `eagle_runner/` | Canonical preset registry, sbatch rendering, submit |
-| Submit scripts | `scripts/` | Local/VPS helpers for Slurm eval, viz, train jobs |
-| API service | `services/api/` | Training jobs, configs, HPC status, datasets, models |
-| Inference service | `services/inference/` | ONNX runtime API + NATS realtime inference |
-| Data/ETL | `pipelines/`, `data/` | Bronze/Silver/Gold dataset pipeline |
-| Reports and thesis | `docs/` | Research logs, thesis LaTeX, figures |
+The platform spans **edge capture → medallion data lake → HPC training → MLOps → serving**:
 
-## Main Models
+| Block | Components |
+|-------|------------|
+| **Users & access** | Web portal (dashboard, jobs, experiments, models), REST/WebSocket inference API |
+| **Core services** | Auth, config/model registry, job service, HPC adapter (Eagle/Helios), MLflow, logs — via **NATS** message bus |
+| **Data pipeline** | Dagster ETL: Raw (MM-Fi, WiPose, WiAR) → **Bronze** (Parquet/S3) → **Silver** → **Silver-Unified** → **Gold** (`X.memmap`, pose/action labels, train/val/test) |
+| **ML training** | PyTorch on Eagle H100: loader → preprocess → backbone + pose/action heads → MPJPE + CE → AdamW → checkpoints |
+| **Evaluation** | `eval_v2.py` → MPJPE, PA-MPJPE, action accuracy/F1 → JSON/CSV + plots → MLflow artifacts |
+| **Infrastructure** | Docker Compose, GitHub Actions CI/CD, Prometheus + Grafana + Loki, PostgreSQL + S3/MinIO |
 
-| Config | Task | Model | Dataset | Use when |
-| --- | --- | --- | --- | --- |
-| `wimose_mmfi17j_proto1_eagle` | pose | WiMoseNet Proto1 | `rfpose-humanlike-v2-proto1` | Main MM-Fi 17J pose result |
-| `rootrel_mmfi_eagle` | multitask | CSITransformerPoseRootRel | `rfpose-unified-v2` | Pose/action multitask baseline |
-| `rootrel_mmfi_action_only_from_scratch_eagle` | action | RootRel action | `rfpose-unified-v2` | Action-only ablation |
-| `rootrel_mmfi_pose_only_eagle` | pose | RootRel pose | `rfpose-unified-v2` | Transformer pose ablation |
-| `vit2d_mmfi_eagle` | pose | CSIViT2DPose | `rfpose-unified-v2` | ViT/attention baseline |
-| `ssl_eagle` | pretrain | CSI encoder SSL | `rfpose-unified-v2` | Representation pretraining |
+### Tech stack
 
-List the registered presets:
+| Area | Technologies |
+|------|--------------|
+| Backend | Python 3.11+, FastAPI, Uvicorn, Pydantic |
+| Frontend | React, TypeScript, Vite, Ant Design |
+| Data & ML | PyTorch, NumPy, Pandas, PyArrow, scikit-learn, Hydra |
+| MLOps | MLflow, Dagster |
+| Messaging & storage | NATS, PostgreSQL, S3/MinIO |
+| DevOps & observability | Docker, Docker Compose, GitHub Actions, Prometheus, Grafana |
 
-```bash
-LIST_CONFIGS=1 ./scripts/eagle_submit_train.sh
-```
+### Repository map
 
-The registry lives in:
+| Layer | Path | Role |
+|-------|------|------|
+| ML core | [`ml/rfpose/`](ml/rfpose/) | Models, training, evaluation |
+| Configs | [`ml/configs/`](ml/configs/) | Hydra YAML experiment configs |
+| HPC registry | [`eagle_runner/rfpose_eagle/registry.py`](eagle_runner/rfpose_eagle/registry.py) | Canonical training presets |
+| Submit | [`scripts/eagle_submit_train.sh`](scripts/eagle_submit_train.sh) | Render sbatch & submit to Eagle |
+| ETL | [`pipelines/`](pipelines/) | Dagster Bronze → Silver → Gold |
+| API | [`services/api/`](services/api/) | FastAPI control plane |
+| Inference | [`services/inference/`](services/inference/) | ONNX + NATS inference |
+| Firmware | [`firmware/`](firmware/) | ESP32-S3 CSI node |
+| Infra | [`infra/docker-compose/`](infra/docker-compose/) | Local dev stack |
 
-```text
-eagle_runner/rfpose_eagle/registry.py
-```
+---
 
-Add new models there first, then add the matching Hydra config in `ml/configs/`.
+## Quick Start
 
-## Results Snapshot
+### Prerequisites
 
-### Pose
+- **Python 3.11+**
+- **Docker** & **Docker Compose**
+- **SSH** to Eagle HPC (for remote training)
+- Optional: **CUDA** for local ML smoke tests
 
-| Model | Split | N | MPJPE | PA-MPJPE | Protocol |
-| --- | ---: | ---: | ---: | ---: | --- |
-| WiMose Proto1 | val | 1,500 | 157.3 mm | 147.5 mm | MM-Fi Proto1 |
-| WiMose Proto1 | test | 1,104 | 173.6 mm | 157.1 mm | MM-Fi Proto1 |
-| RootRel pose | val | 1,296 | 306.6 mm | 216.4 mm | unified-v2 |
-| RootRel pose | test | 1,296 | 310.5 mm | 216.3 mm | unified-v2 |
-
-### Action
-
-| Model | Split | Accuracy | Macro-F1 | Protocol |
-| --- | ---: | ---: | ---: | --- |
-| RootRel multitask/action | val | 91.28% | 90.95% | unified-v2 |
-| RootRel multitask/action | test | 91.51% | 91.37% | unified-v2 |
-| Proto1 action head | val/test | 18-19% | low | Proto1 |
-
-## Local Development
-
-### Requirements
-
-- Python 3.11+
-- Docker + Docker Compose
-- PostgreSQL client tools if running migrations manually
-- SSH key configured for Eagle if submitting HPC jobs
-- Optional: CUDA/PyTorch environment for local ML smoke tests
-
-### Start the dev stack
+### 1. Clone & configure
 
 ```bash
-cp .env.example .env
+git clone https://github.com/tientruongminh/rf-worldpose.git
+cd rf-worldpose
+cp .env.example .env   # edit secrets if needed
+```
+
+### 2. Start local platform
+
+```bash
 ./scripts/dev_up.sh
+# or: make up
 ```
-
-Useful local URLs:
 
 | Service | URL |
-| --- | --- |
-| API Swagger | http://localhost:8080/docs |
+|---------|-----|
+| API (Swagger) | http://localhost:8080/docs |
 | MLflow | http://localhost:5000 |
 | MinIO console | http://localhost:9003 |
 | Dagster | http://localhost:3004 |
 | Grafana | http://localhost:3002 |
-| Prometheus | http://localhost:9090 |
 
-Stop services:
+Stop: `make down` · Reset volumes: `docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down -v`
+
+### 3. Install ML package (optional, for local runs)
 
 ```bash
-docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down
+cd ml && pip install -e .
 ```
 
-Reset local state:
+### 4. Submit your first training job (Eagle)
 
 ```bash
-docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down -v
-```
-
-## Submit Training Jobs
-
-### Recommended pose job
-
-```bash
+# Default: WiMose Proto1 pose (recommended)
 ./scripts/eagle_submit_train.sh
+
+# Dry-run: render sbatch only
+DRY_RUN=1 ./scripts/eagle_submit_train.sh
+
+# List all registered presets
+LIST_CONFIGS=1 ./scripts/eagle_submit_train.sh
 ```
 
-Default config is now:
+---
 
-```text
-wimose_mmfi17j_proto1_eagle
-```
+## Models & Training Presets
 
-This is the main single-task pose model.
+Add or change presets in **`eagle_runner/rfpose_eagle/registry.py`**, then add matching Hydra YAML under **`ml/configs/`**.
 
-### RootRel multitask/action
-
-```bash
-CONFIG=rootrel_mmfi_eagle ./scripts/eagle_submit_train.sh
-```
-
-### RootRel action from scratch
-
-```bash
-CONFIG=rootrel_mmfi_action_only_from_scratch_eagle ./scripts/eagle_submit_train.sh
-```
-
-### Dry run sbatch render
-
-```bash
-DRY_RUN=1 CONFIG=wimose_mmfi17j_proto1_eagle ./scripts/eagle_submit_train.sh
-```
-
-### Smoke test
-
-```bash
-SMOKE=1 CONFIG=quick_test ./scripts/eagle_submit_train.sh
-```
+| Config | Family | Task | Train module | Dataset |
+|--------|--------|------|--------------|---------|
+| `wimose_mmfi17j_proto1_eagle` ⭐ | WiMoseNet | pose | `train_wimose` | humanlike Proto1 |
+| `rootrel_mmfi_eagle` | RootRel Transformer | multitask | `train_v2` | unified-v2 |
+| `rootrel_mmfi_pose_only_eagle` | RootRel | pose | `train_v2` | unified-v2 |
+| `rootrel_mmfi_action_only_from_scratch_eagle` | RootRel | action | `train_v2` | unified-v2 |
+| `vit2d_mmfi_eagle` | CSIViT2D | pose | `train_vit2d` | unified-v2 |
+| `ssl_eagle` | SSL CNN | pretrain | `ssl_pretrain` | unified-v2 |
+| `quick_test` | smoke | smoke | `transformer_train` | unified-v2 |
 
 ### Common submit environment variables
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `CONFIG` | `wimose_mmfi17j_proto1_eagle` | Registered training config |
-| `JOB_ID` | timestamped `rfpose-*` | Slurm/checkpoint run id |
-| `DATASET_VERSION` | preset default | Gold dataset version |
-| `GPUS` | preset default | GPU count in rendered sbatch |
-| `CPUS` | preset default | CPU count |
-| `MEM` | preset default | Slurm memory request |
-| `TIME_LIMIT` | preset default | Slurm wall time |
-| `SKIP_DATA` | `0` | Do not rsync local gold data |
-| `FORCE_DATA` | `0` | Re-sync gold data even if remote exists |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONFIG` | `wimose_mmfi17j_proto1_eagle` | Registered preset name |
+| `JOB_ID` | auto `rfpose-*` | Run / checkpoint id |
 | `DRY_RUN` | `0` | Render sbatch without submitting |
+| `SMOKE` | `0` | Short smoke-test preset |
+| `SKIP_DATA` | `0` | Skip gold data rsync |
+| `GPUS` / `CPUS` / `MEM` / `TIME_LIMIT` | preset defaults | Slurm resources |
 
-## Evaluate Models
-
-Run the SOTA/internal comparison job on Eagle:
-
-```bash
-sbatch scripts/eval_sota_pose_compare.sbatch
-```
-
-Outputs:
-
-```text
-eval_results/sota-pose-compare/
-  wimose-proto1-val.json
-  wimose-proto1-test.json
-  rootrel-mmfi-v1-val-pose.json
-  rootrel-mmfi-v1-test-pose.json
-  summary.json
-```
-
-Generate WiMose top-k visualizations:
+### Examples
 
 ```bash
-sbatch scripts/viz_wimose_proto1_top.sbatch
+# RootRel multitask (pose + action)
+CONFIG=rootrel_mmfi_eagle ./scripts/eagle_submit_train.sh
+
+# RootRel action-only from scratch
+CONFIG=rootrel_mmfi_action_only_from_scratch_eagle ./scripts/eagle_submit_train.sh
+
+# ViT2D baseline
+CONFIG=vit2d_mmfi_eagle ./scripts/eagle_submit_train.sh
+
+# Smoke test
+SMOKE=1 CONFIG=quick_test ./scripts/eagle_submit_train.sh
 ```
 
-Export MLflow curves for thesis/report figures:
+---
+
+## Evaluation & Figures
+
+Run evaluation on Eagle after training (checkpoint + Gold NPZ on the cluster):
 
 ```bash
-python scripts/fetch_mlflow_training_curves.py
+# WiMose action eval (Proto1)
+sbatch scripts/eval_wimose_action_test.sbatch
+
+# WiMose action-only head eval
+sbatch scripts/eval_wimose_action_only_test.sbatch
+
+# Registered eval wrapper preset
+CONFIG=eval_demo ./scripts/eagle_submit_train.sh
 ```
 
-## API Usage
+Pose visualization (on Eagle workspace with checkpoint + dataset):
 
-The FastAPI service exposes control-plane endpoints.
+```bash
+python scripts/viz_mmfi17j_best.py --checkpoint /path/to/best.pt --out viz_output/mmfi17j_best
+python scripts/viz_wimose_best_eda_overlay.py   # EDA overlay plots
+```
+
+Metrics are logged to **MLflow** during training. Export curves from the MLflow UI or query the tracking API. Thesis/report figures live under `docs/thesis/figures/` when generated.
+
+---
+
+## API & Services
 
 ### List training presets
 
@@ -221,58 +270,25 @@ The FastAPI service exposes control-plane endpoints.
 curl http://localhost:8080/api/v1/hpc/configs
 ```
 
-### Create a job record
+### Create job → dry-run → submit
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/training-jobs \
   -H 'Content-Type: application/json' \
   -d '{
-    "id": "wimose-proto1-report-run",
+    "id": "wimose-proto1-run",
     "dataset_version": "rfpose-humanlike-v2-proto1",
     "train_config": "wimose_mmfi17j_proto1_eagle",
-    "submitted_by": "tiencd"
+    "submitted_by": "researcher"
   }'
+
+curl -X POST 'http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-run/submit?dry_run=true'
+curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-run/submit
 ```
 
-### Dry-run submit
+### Inference service
 
-```bash
-curl -X POST 'http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/submit?dry_run=true'
-```
-
-### Submit to Eagle
-
-```bash
-curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/submit
-```
-
-### Refresh/cancel/logs
-
-```bash
-curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/refresh-status
-curl http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/logs
-curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/cancel
-```
-
-## Inference Service
-
-The inference service loads:
-
-```text
-$MODEL_DIR/model.onnx
-```
-
-Endpoints:
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | liveness and model loaded state |
-| `GET /status` | model IO shapes, NATS, buffer and stats |
-| `POST /predict` | manual CSI window inference |
-| `POST /reload` | reload `model.onnx` from disk |
-| `GET /predictions/recent` | recent NATS realtime predictions |
-
-Manual prediction payload:
+Loads `$MODEL_DIR/model.onnx`. Key endpoints: `GET /health`, `GET /status`, `POST /predict`, `POST /reload`.
 
 ```json
 {
@@ -280,69 +296,106 @@ Manual prediction payload:
 }
 ```
 
-The service now decodes both action logits and pose outputs. Pose outputs with
-shape `(B, J, 3)` are returned as `pose_3d`; `(B, J, 2)` is returned as `pose_2d`.
+Returns `action` logits and `pose_3d` / `pose_2d` when the exported ONNX head supports them.
 
-## Thesis/Report Artifacts
+---
 
-Key generated artifacts:
-
-```text
-viz_output/mlflow_curves/
-viz_output/wimose_proto1_top/
-viz_output/mmfi17j_best/
-eval_results/sota-pose-compare/
-docs/thesis/
-```
-
-Important thesis files currently prepared:
+## Project Structure
 
 ```text
-docs/thesis/chapter2_co_so_ly_thuyet.tex
-docs/thesis/chapter4_3_to_4_6_results_expanded.tex
+rf-worldpose/
+├── ml/                    # PyTorch models, configs, training, eval
+│   ├── configs/           # Hydra YAML
+│   └── rfpose/
+├── eagle_runner/          # HPC preset registry + Slurm submit
+├── scripts/               # dev_up, eagle_submit, eval, viz
+├── services/
+│   ├── api/               # FastAPI control plane
+│   └── inference/         # ONNX inference + NATS
+├── pipelines/             # Dagster ETL
+├── firmware/              # ESP32 CSI node
+├── gateway/               # Edge CSI gateway (Rust)
+├── infra/docker-compose/  # Local dev stack
+├── docs/                  # Architecture, API, research logs
+└── notebooks/             # Exploratory analysis
 ```
 
-## Development Checks
+---
 
-Compile Python:
+## Development
 
 ```bash
+# Compile-check Python packages
 python -m compileall eagle_runner services/api/src services/inference/src ml/rfpose
-```
 
-Run API contract tests:
-
-```bash
+# API tests
 PYTHONPATH=services/api/src:eagle_runner pytest services/api/tests
+
+# Validate compose config
+cd infra/docker-compose && docker compose config --quiet
 ```
 
-Render a submit dry run:
+CI runs on push/PR to `main` and `develop` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-```bash
-DRY_RUN=1 SKIP_DATA=1 ./scripts/eagle_submit_train.sh
-```
+---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| Wrong model submitted | Config not in registry | Add/update `eagle_runner/rfpose_eagle/registry.py` |
-| Pose visualization is far away or collapsed | Coordinate mismatch | Check `center_pose`, `root_joint`, CSI mean/std metadata |
-| Proto1 action stuck at 18-19% | Majority baseline behavior | Use RootRel/unified-v2 for action, or redesign Proto1 action training |
-| Slurm shows FAILED after checkpoint exists | DDP teardown or post-train failure | Check `best.pt`, eval checkpoint before resubmit |
-| MLflow logging too slow | Logging per batch | Log metrics per epoch for long jobs |
-| Inference says no model loaded | Missing `model.onnx` | Copy/export model to `$MODEL_DIR/model.onnx`, then `POST /reload` |
+| Symptom | Likely cause | What to do |
+|---------|--------------|------------|
+| Wrong model submitted | Preset not in registry | Update `registry.py` + `ml/configs/` |
+| Pose viz collapsed / far away | Coord mismatch | Check `center_pose`, `root_joint`, CSI norm in checkpoint |
+| Proto1 action ~18–19% | Majority-class baseline | Use RootRel on unified-v2 for action |
+| Slurm FAILED but `best.pt` exists | DDP teardown after train | Evaluate checkpoint before resubmit |
+| MLflow job very slow | Per-batch logging | Log metrics per epoch |
+| Inference: no model | Missing ONNX | Export to `$MODEL_DIR/model.onnx`, `POST /reload` |
 
-## Current Research Position
+---
 
-Use this wording in reports:
+## Documentation
 
-1. **WiMose Proto1 is the strongest pose model in the RF-WorldPose pipeline** and
-   beats the reproduced/internal baselines under the MM-Fi Protocol 1 setup.
-2. **Single-task training is better for pose regression** in the current
-   experiments. **Multitask training is better suited for action classification**
-   because pose/motion supervision enriches the action representation.
+| Resource | Path |
+|----------|------|
+| ML training guide (Vietnamese) | [`ml/README.md`](ml/README.md) |
+| System overview (Vietnamese) | [`docs/system-overview-vi.md`](docs/system-overview-vi.md) |
+| Architecture | [`docs/architecture.md`](docs/architecture.md) |
+| API reference | [`docs/api.md`](docs/api.md) |
+| Research log (30 days) | [`docs/research-log-30d-2026-05-14_to_2026-06-13.md`](docs/research-log-30d-2026-05-14_to_2026-06-13.md) |
+| Datasets & models | [`docs/datasets-training-model.md`](docs/datasets-training-model.md) |
+| ESP32 firmware | [`firmware/esp32-csi-node/README.md`](firmware/esp32-csi-node/README.md) |
 
-Avoid claiming a global SOTA result unless the comparison uses the exact same
-dataset, skeleton, split, preprocessing and evaluation protocol as the external
-paper.
+---
+
+## Contributing
+
+1. **Register new experiments** in `eagle_runner/rfpose_eagle/registry.py` before adding ad-hoc sbatch scripts.
+2. **Keep protocol explicit** in configs, eval JSON, and docs (Proto1 vs unified-v2, joint count, split).
+3. **Run compile check** before opening a PR.
+4. **Do not commit** secrets, `.env`, large checkpoints, or raw datasets.
+
+```bash
+git checkout -b feature/my-experiment
+# ... changes ...
+python -m compileall ml/rfpose eagle_runner
+git commit -m "feat(ml): add my-experiment preset and config"
+```
+
+---
+
+## Citation
+
+If you use this codebase in academic work, please cite the project and the underlying datasets (MM-Fi, WiPose, etc.) according to their respective papers. A formal BibTeX entry will be added when the thesis/preprint is published.
+
+---
+
+## License
+
+This repository is an academic research project. License terms are not yet finalized in the root `LICENSE` file — contact the maintainers before commercial use.
+
+---
+
+<div align="center">
+
+**RF-WorldPose** — sensing human motion through the wireless channel.
+
+</div>
