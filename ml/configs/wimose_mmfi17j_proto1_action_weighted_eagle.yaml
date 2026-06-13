@@ -1,0 +1,17 @@
+# WiMose Proto1 pose ckpt → action head with inverse-frequency CE (backbone frozen)
+defaults:
+  - wimose_mmfi17j_proto1_action_eagle
+  - _self_
+
+loss:
+  lambda_action: 1.5
+  action_class_weights: true
+
+training:
+  epochs: 20
+  patience: 10
+  early_stop_metric: val_action_acc
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-proto1-action-weighted-v1"
+
+mlflow:
+  run_name: "wimose-mmfi17-proto1-action-weighted-v1"

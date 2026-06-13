@@ -35,3 +35,11 @@ outputs/
 ml/experiment_log.md
 ml/rfpose/data/label_maps.json
 ml/rfpose/data/manifest.json
+viz_output/
+csi_encoder_pretrained.pt
+mlflow.db
+.claude/
+.gitnexus/
+.jupyter/
+*.Zone.Identifier
+.ipynb_checkpoints/

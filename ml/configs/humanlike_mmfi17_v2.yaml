@@ -1,0 +1,10 @@
+# Legacy alias — use humanlike_mmfi17_proto1.yaml for new runs.
+defaults:
+  - humanlike_mmfi17_proto1
+  - _self_
+
+training:
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/humanlike-mmfi17-v2"
+
+mlflow:
+  run_name: "humanlike-mmfi17-v2-clean-split"

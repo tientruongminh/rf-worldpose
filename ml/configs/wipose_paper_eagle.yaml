@@ -1,0 +1,52 @@
+# WiPose paper reimplementation (Jiang et al., MobiCom 2020)
+# Architecture: 4-layer 2D CNN + 3-layer LSTM + Forward Kinematics
+# Loss: Lp + β·Ls + γ·Lr  (β=γ=1.0)
+#
+# Does NOT inherit from transformer_gold — independent config.
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-wipose-18j-v1"
+  datasets: ["wipose"]
+  format: "gold_npz"
+  n_joints: 18
+  window_size: 60
+  augment: true
+  val_ratio: 0.1
+  require_pose: true
+
+model:
+  # CNN (paper Section 6.1.2)
+  n_antennas: 9             # 3 groups × 3 antennas
+  n_sub: 30                 # WiFi subcarriers
+  n_packets: 5              # time samples per frame
+  cnn_dropout: 0.2          # paper: 0.2
+
+  # LSTM (paper Section 6.1.2)
+  lstm_hidden: 544          # paper: 544
+  lstm_layers: 3            # paper: 3
+  lstm_dropout: 0.1         # paper: 0.1
+
+loss:
+  beta: 1.0                 # smooth loss weight (paper: 1.0)
+  gamma: 1.0                # rotation loss weight (paper: 1.0)
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 100
+  lr: 1.0e-3                # paper uses Adam (default lr)
+  weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_epochs: 3
+  patience: 25
+  save_every: 10
+  log_every: 20
+  amp: true
+  num_workers: 4
+  seed: 42
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-wipose"
+  run_name: "wipose-paper-18j-v1"

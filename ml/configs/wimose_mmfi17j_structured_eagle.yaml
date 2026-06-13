@@ -1,0 +1,43 @@
+# Wi-Mose on MM-Fi — Structured Loss (bone + symmetry + diversity)
+# Protocol 1 (within-subject) + new loss terms to fix mean-collapse.
+# 2-GPU DDP via torchrun --nproc_per_node=2
+
+data:
+  gold_dir: "/tmp/rfpose_gold_mmfi_proto1_SLURM_JOB_ID"   # overridden by sbatch
+  datasets: ["mmfi"]
+  n_joints: 17
+  n_subcarriers: 342
+  window_size: 60
+  augment: true
+  require_pose: true
+  normalize_csi: true
+  center_pose: true
+  root_joint: 0         # H36M Pelvis
+
+model:
+  use_gcn_head: false   # flat MLP — same architecture, only loss changed
+
+loss:
+  huber_delta: 0.75
+  lambda_bone: 0.5      # bone-length consistency — fixes arm/hip collapse
+  lambda_sym: 0.1       # left-right symmetry — no GT needed
+  lambda_div: 0.05      # batch variance matching — anti mean-regression
+
+training:
+  device: "cuda"
+  epochs: 120
+  batch_size: 32
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+  save_every: 10
+  amp: true
+  num_workers: 2
+  seed: 42
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-struct-v1"
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-wimose"
+  run_name: "wimose-mmfi17j-struct-loss-v1"

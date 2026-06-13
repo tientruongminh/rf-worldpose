@@ -1,0 +1,46 @@
+# WiPose architecture on MM-Fi 17 joints (H36M skeleton)
+# Full CSI: 3 antennas × 114 subcarriers × 10 packets = 3420 features/frame
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-mmfi-wipose-17j-v1"
+  datasets: ["mmfi"]
+  format: "gold_npz"
+  n_joints: 17
+  window_size: 60
+  augment: true
+  val_ratio: 0.1
+  require_pose: true
+
+model:
+  n_antennas: 3              # MM-Fi: 3 antennas
+  n_sub: 114                 # MM-Fi: 114 subcarriers
+  n_packets: 10              # MM-Fi: 10 packets/frame (kept full!)
+  cnn_dropout: 0.2
+  lstm_hidden: 544
+  lstm_layers: 3
+  lstm_dropout: 0.1
+
+loss:
+  beta: 1.0
+  gamma: 1.0
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 100
+  lr: 1.0e-3
+  weight_decay: 0.0
+  grad_clip: 1.0
+  warmup_epochs: 3
+  patience: 25
+  save_every: 10
+  log_every: 20
+  amp: true
+  num_workers: 4
+  seed: 42
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-wipose"
+  run_name: "wipose-mmfi-17j-v1"

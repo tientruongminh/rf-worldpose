@@ -37,6 +37,40 @@ COCO_SYMMETRIC_PAIRS = [
     (1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16),
 ]
 
+# Human3.6M 17-joint skeleton (MM-Fi ground_truth.npy ordering):
+#   0:Pelvis 1:R_Hip 2:R_Knee 3:R_Ankle 4:L_Hip 5:L_Knee 6:L_Ankle
+#   7:Spine 8:Thorax 9:Nose 10:Head_Top 11:L_Shoulder 12:L_Elbow
+#   13:L_Wrist 14:R_Shoulder 15:R_Elbow 16:R_Wrist
+H36M_BONES = [
+    (0, 1), (1, 2), (2, 3),       # pelvis → right leg
+    (0, 4), (4, 5), (5, 6),       # pelvis → left leg
+    (0, 7), (7, 8),               # pelvis → spine → thorax
+    (8, 9), (9, 10),              # thorax → nose → head
+    (8, 11), (11, 12), (12, 13),  # thorax → left arm
+    (8, 14), (14, 15), (15, 16),  # thorax → right arm
+]
+H36M_SYMMETRIC_PAIRS = [
+    (1, 4), (2, 5), (3, 6),       # right/left leg
+    (11, 14), (12, 15), (13, 16), # left/right arm
+]
+
+# Wi-Pose 18-joint skeleton (VICON markers):
+#   0:Head 1:Neck 2:R_Shoulder 3:R_Elbow 4:R_Wrist 5:R_Hand
+#   6:L_Shoulder 7:L_Elbow 8:L_Wrist 9:L_Hand
+#   10:R_Hip 11:R_Knee 12:R_Ankle 13:R_Foot
+#   14:L_Hip 15:L_Knee 16:L_Ankle 17:L_Foot
+WIPOSE_BONES = [
+    (1, 0),                                  # neck → head
+    (1, 2), (2, 3), (3, 4), (4, 5),          # neck → right arm → hand
+    (1, 6), (6, 7), (7, 8), (8, 9),          # neck → left arm → hand
+    (1, 10), (10, 11), (11, 12), (12, 13),   # neck → right leg → foot
+    (1, 14), (14, 15), (15, 16), (16, 17),   # neck → left leg → foot
+]
+WIPOSE_SYMMETRIC_PAIRS = [
+    (2, 6), (3, 7), (4, 8), (5, 9),          # right/left arm
+    (10, 14), (11, 15), (12, 16), (13, 17),  # right/left leg
+]
+
 # RF-WorldPose Gold ETL skeleton (13 joints)
 RFPOSE_13_BONES = [
     (0, 1), (0, 2),
@@ -47,11 +81,15 @@ RFPOSE_13_BONES = [
 RFPOSE_13_SYMMETRIC = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12)]
 
 
-def skeleton_for_joints(n_joints: int) -> tuple[list, list]:
+def skeleton_for_joints(n_joints: int, skeleton_type: str = "auto") -> tuple[list, list]:
     if n_joints == 13:
         return RFPOSE_13_BONES, RFPOSE_13_SYMMETRIC
     if n_joints == 17:
-        return COCO_BONES, COCO_SYMMETRIC_PAIRS
+        if skeleton_type == "coco":
+            return COCO_BONES, COCO_SYMMETRIC_PAIRS
+        return H36M_BONES, H36M_SYMMETRIC_PAIRS
+    if n_joints == 18:
+        return WIPOSE_BONES, WIPOSE_SYMMETRIC_PAIRS
     raise ValueError(f"No skeleton definition for n_joints={n_joints}")
 
 

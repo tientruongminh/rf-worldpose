@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: rfpose-api
-Version: 0.1.0
-Requires-Python: >=3.11
-Requires-Dist: fastapi
-Requires-Dist: uvicorn[standard]
-Requires-Dist: pydantic
-Requires-Dist: pydantic-settings
-Requires-Dist: psycopg[binary]
