@@ -1,212 +1,348 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://capsule-render.vercel.app/api?type=waving&height=220&color=0:020617,55:064e3b,100:111827&text=RF-WorldPose&fontColor=f8fafc&fontSize=54&fontAlignY=38&desc=WiFi%20CSI%20sensing%20platform%20for%20RF%20human%20perception&descAlignY=58&descSize=16">
-    <img alt="RF-WorldPose" src="https://capsule-render.vercel.app/api?type=waving&height=220&color=0:f8fafc,55:d1fae5,100:e5e7eb&text=RF-WorldPose&fontColor=111827&fontSize=54&fontAlignY=38&desc=WiFi%20CSI%20sensing%20platform%20for%20RF%20human%20perception&descAlignY=58&descSize=16">
-  </picture>
-</p>
+# RF-WorldPose
 
-<p align="center">
-  <a href="docs/final-architecture.md"><img alt="Architecture" src="https://img.shields.io/badge/architecture-production--oriented-064e3b?style=for-the-badge"></a>
-  <a href="docs/helios.md"><img alt="Helios" src="https://img.shields.io/badge/HPC-Helios%20GH200-0f172a?style=for-the-badge"></a>
-  <a href="docs/mlops.md"><img alt="MLOps" src="https://img.shields.io/badge/MLOps-Bronze%20%7C%20Silver%20%7C%20Gold-14532d?style=for-the-badge"></a>
-  <a href="docs/security.md"><img alt="Security" src="https://img.shields.io/badge/security-mTLS%20%7C%20signed%20OTA-111827?style=for-the-badge"></a>
-</p>
+RF-WorldPose is a research and platform codebase for WiFi CSI human sensing. It
+turns wireless channel state information into ML-ready datasets, trains pose and
+action models on HPC, tracks experiments in MLflow, and exposes backend services
+for dataset, training, model and inference operations.
 
-<p align="center">
-  <b>RF-WorldPose</b> is a production/research platform for WiFi CSI human sensing: four ESP32-S3 nodes capture RF channel state, a Rust gateway turns packets into reliable data streams, and a full MLOps pipeline trains WiFi-only skeleton/DensePose models on Helios GH200.
-</p>
+The current research conclusion is:
 
----
+- **Pose regression:** use the single-task **WiMose Proto1** pipeline on MM-Fi
+  Protocol 1. Current held-out test result: **173.6 mm MPJPE / 157.1 mm
+  PA-MPJPE** on 1,104 test samples.
+- **Action classification:** use the **RootRel multitask/action** pipeline when
+  action labels are the goal. RootRel reaches about **91% accuracy and macro-F1**
+  on unified-v2, but its pose regression is weaker than WiMose.
 
-## Why this exists
+Do not compare numbers across protocols without checking dataset version,
+skeleton, split and preprocessing. The repo now uses `rfpose_eagle.registry` as
+the canonical source for model/config submit presets.
 
-Human perception normally depends on cameras. RF-WorldPose explores a harder path: infer presence, motion, skeleton structure, and DensePose-style representations from WiFi CSI alone.
-
-The repository is built as a real platform rather than a notebook demo: firmware, edge gateway, control plane, data lake, ETL, HPC training, model governance, serving, monitoring, and security are separated into production-style contracts.
+## Architecture
 
 ```text
-ESP32-S3 CSI mesh
-   -> Rust/Tokio edge gateway
-      -> NATS JetStream + local buffer
-         -> MinIO/S3 Bronze lake
-            -> Dagster ETL: Bronze -> Silver -> Gold
-               -> Dataset registry
-                  -> Helios GH200 Slurm training
-                     -> MLflow + model card + eval gates
-                        -> ONNX edge serving / Triton cloud serving
-                           -> monitoring, rollback, feedback loop
+CSI / dataset sources
+  -> Bronze / Silver / Gold ETL
+  -> ML-ready memmap/parquet datasets
+  -> PyTorch training on Eagle HPC via Slurm
+  -> MLflow metrics + artifacts + checkpoints
+  -> evaluation reports + thesis figures
+  -> API control plane + inference service
 ```
 
-## System at a glance
-
-| Layer | What it does | Implementation |
+| Layer | Path | Purpose |
 | --- | --- | --- |
-| Sensor firmware | Captures WiFi CSI, encodes CRC-protected packets, streams UDP | ESP-IDF C/C++ |
-| Edge gateway | Validates packets, tracks drops, buffers locally, publishes upstream | Rust, Tokio, SQLite, NATS |
-| Control plane | Deployments, nodes, sessions, datasets, training jobs, model registry | FastAPI, PostgreSQL |
-| Data lake | Immutable Bronze, decoded Silver, ML-ready Gold datasets | MinIO/S3, Dagster, Polars, PyArrow |
-| Training | RFWorldPose model, LoRA adapters, distillation, evaluation | PyTorch, Hydra, MLflow |
-| HPC backend | Batch training and artifact export on GH200 nodes | Helios Slurm `plgrid-gpu-gh200` |
-| Serving | Edge inference and cloud inference contracts | ONNX Runtime, Triton/TensorRT |
-| Operations | Metrics, logs, dashboards, deployment manifests, security posture | Prometheus, Grafana, Loki, k8s, mTLS |
+| ML models and training | `ml/rfpose/` | WiMose, RootRel, ViT2D, SSL, eval scripts |
+| Training configs | `ml/configs/` | Hydra YAML configs used by Slurm jobs |
+| HPC submitter | `eagle_runner/` | Canonical preset registry, sbatch rendering, submit |
+| Submit scripts | `scripts/` | Local/VPS helpers for Slurm eval, viz, train jobs |
+| API service | `services/api/` | Training jobs, configs, HPC status, datasets, models |
+| Inference service | `services/inference/` | ONNX runtime API + NATS realtime inference |
+| Data/ETL | `pipelines/`, `data/` | Bronze/Silver/Gold dataset pipeline |
+| Reports and thesis | `docs/` | Research logs, thesis LaTeX, figures |
 
-## Repository layout
+## Main Models
+
+| Config | Task | Model | Dataset | Use when |
+| --- | --- | --- | --- | --- |
+| `wimose_mmfi17j_proto1_eagle` | pose | WiMoseNet Proto1 | `rfpose-humanlike-v2-proto1` | Main MM-Fi 17J pose result |
+| `rootrel_mmfi_eagle` | multitask | CSITransformerPoseRootRel | `rfpose-unified-v2` | Pose/action multitask baseline |
+| `rootrel_mmfi_action_only_from_scratch_eagle` | action | RootRel action | `rfpose-unified-v2` | Action-only ablation |
+| `rootrel_mmfi_pose_only_eagle` | pose | RootRel pose | `rfpose-unified-v2` | Transformer pose ablation |
+| `vit2d_mmfi_eagle` | pose | CSIViT2DPose | `rfpose-unified-v2` | ViT/attention baseline |
+| `ssl_eagle` | pretrain | CSI encoder SSL | `rfpose-unified-v2` | Representation pretraining |
+
+List the registered presets:
+
+```bash
+LIST_CONFIGS=1 ./scripts/eagle_submit_train.sh
+```
+
+The registry lives in:
 
 ```text
-firmware/esp32-csi-node/      ESP32-S3 CSI firmware, packet encoder, provisioning
- gateway/rf-gateway/          Rust/Tokio gateway: UDP, CRC, buffer, NATS, S3, metrics
- services/api/                FastAPI control plane and registry endpoints
- pipelines/dagster/           Bronze -> Silver -> Gold ETL assets and transforms
- helios_runner/               Slurm template rendering, submit, status, cancel tools
- ml/rfpose/                   PyTorch models, training, eval, export, packaging
- dashboard/                   Next.js operations UI and product landing page
- infra/                       Docker Compose, k8s, Triton, monitoring, security
- docs/                        Architecture, runbooks, deployment, security, MLOps
- tools/mock_sender/           Synthetic CSI packet sender for gateway smoke tests
+eagle_runner/rfpose_eagle/registry.py
 ```
 
-## What is implemented
+Add new models there first, then add the matching Hydra config in `ml/configs/`.
 
-- ESP32 CSI packet contract with native C unit test
-- ESP-IDF CSI callback path and UDP streamer
-- Rust gateway packet decoder, CRC validation, local SQLite buffer, NATS hooks, S3 Bronze uploader
-- FastAPI control plane for deployments, sessions, datasets, training jobs, and models
-- PostgreSQL schema for platform metadata
-- Dagster/Polars ETL from Bronze to Silver and Gold
-- Dataset registration helper
-- RFWorldPose model, training, evaluation, export, and eval gates
-- LoRA adapter and knowledge distillation training path
-- Model artifact packager with model card and SHA256 manifest
-- Helios GH200 Slurm submitter with dry-run test
-- Triton model repository contract and ONNX serving path
-- Docker Compose lab stack and Kubernetes base manifests
-- Prometheus/Grafana/Loki monitoring scaffold
-- mTLS, SOPS/Vault, signed OTA security docs
-- Production runbook and deployment documentation
+## Results Snapshot
 
-## Prerequisites
+### Pose
 
-| Tool | Required for |
-| --- | --- |
-| Docker + Docker Compose | Running the full stack |
-| `psql` (PostgreSQL client) | Database migrations |
-| Python 3.11+ | Mock sender, ETL, ML training |
-| Rust toolchain (optional) | Building the gateway |
-| Node.js 18+ (optional) | Building the dashboard |
+| Model | Split | N | MPJPE | PA-MPJPE | Protocol |
+| --- | ---: | ---: | ---: | ---: | --- |
+| WiMose Proto1 | val | 1,500 | 157.3 mm | 147.5 mm | MM-Fi Proto1 |
+| WiMose Proto1 | test | 1,104 | 173.6 mm | 157.1 mm | MM-Fi Proto1 |
+| RootRel pose | val | 1,296 | 306.6 mm | 216.4 mm | unified-v2 |
+| RootRel pose | test | 1,296 | 310.5 mm | 216.3 mm | unified-v2 |
 
-## Quick start
+### Action
 
-One command brings up the entire stack (Postgres, NATS, MinIO, MLflow, Dagster, Prometheus, Grafana, Loki), runs database migrations, and initializes MinIO buckets:
+| Model | Split | Accuracy | Macro-F1 | Protocol |
+| --- | ---: | ---: | ---: | --- |
+| RootRel multitask/action | val | 91.28% | 90.95% | unified-v2 |
+| RootRel multitask/action | test | 91.51% | 91.37% | unified-v2 |
+| Proto1 action head | val/test | 18-19% | low | Proto1 |
 
-```bash
-make up
-```
+## Local Development
 
-Or equivalently:
+### Requirements
+
+- Python 3.11+
+- Docker + Docker Compose
+- PostgreSQL client tools if running migrations manually
+- SSH key configured for Eagle if submitting HPC jobs
+- Optional: CUDA/PyTorch environment for local ML smoke tests
+
+### Start the dev stack
 
 ```bash
+cp .env.example .env
 ./scripts/dev_up.sh
 ```
 
-All credentials are centralized in a single `.env` file (auto-created from `.env.example` on first run).
+Useful local URLs:
 
-### Services & credentials
+| Service | URL |
+| --- | --- |
+| API Swagger | http://localhost:8080/docs |
+| MLflow | http://localhost:5000 |
+| MinIO console | http://localhost:9003 |
+| Dagster | http://localhost:3004 |
+| Grafana | http://localhost:3002 |
+| Prometheus | http://localhost:9090 |
 
-| Service | URL | Credentials |
-| --- | --- | --- |
-| API (Swagger) | http://localhost:8080/docs | — |
-| MLflow | http://localhost:5000 | — |
-| Dagster | http://localhost:3004 | — |
-| MinIO Console | http://localhost:9003 | `rfpose` / `rfpose-secret` |
-| Grafana | http://localhost:3002 | `admin` / `admin` |
-| Prometheus | http://localhost:9090 | — |
-| NATS Monitor | http://localhost:8222 | — |
-| PostgreSQL | localhost:5432 | `rfpose` / `rfpose` |
-
-### Useful commands
+Stop services:
 
 ```bash
-make up      # Start the stack
-make down    # Stop the stack (data preserved)
-make ps      # Show container status
-make logs    # Tail logs from all services
+docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down
 ```
 
-To reset all data and start fresh:
+Reset local state:
 
 ```bash
 docker compose -f infra/docker-compose/docker-compose.yml --env-file .env down -v
-make up
 ```
 
-## Gateway smoke test
+## Submit Training Jobs
 
-Once the stack is running, build and run the Rust gateway in a separate terminal:
+### Recommended pose job
 
 ```bash
-cd gateway/rf-gateway
-RFPOSE_DEPLOYMENT_ID=room01 \
-RFPOSE_GATEWAY_BIND=0.0.0.0:5006 \
-RFPOSE_GATEWAY_SQLITE=/tmp/rfpose-gateway.sqlite \
-NATS_URL=nats://localhost:4222 \
-S3_BUCKET=rfpose \
-S3_ENDPOINT_URL=http://localhost:9000 \
-AWS_ACCESS_KEY_ID=rfpose \
-AWS_SECRET_ACCESS_KEY=rfpose-secret \
-cargo run
+./scripts/eagle_submit_train.sh
 ```
 
-Send synthetic CSI packets from another terminal:
+Default config is now:
+
+```text
+wimose_mmfi17j_proto1_eagle
+```
+
+This is the main single-task pose model.
+
+### RootRel multitask/action
 
 ```bash
-python tools/mock_sender/send_mock_csi.py --node-id 1 --count 100
+CONFIG=rootrel_mmfi_eagle ./scripts/eagle_submit_train.sh
 ```
 
-After ~30 seconds the gateway uploads a Bronze batch to MinIO — check the MinIO Console at http://localhost:9003 under `rfpose/bronze/`.
-
-## ETL & training smoke test
-
-Run the full pipeline end-to-end (Bronze → Silver → Gold → Train → Eval → Gate):
+### RootRel action from scratch
 
 ```bash
-bash scripts/validate_etl.sh
+CONFIG=rootrel_mmfi_action_only_from_scratch_eagle ./scripts/eagle_submit_train.sh
 ```
 
-## Validation
+### Dry run sbatch render
 
 ```bash
-make -C firmware/esp32-csi-node/test check          # Firmware packet test (C)
-cargo test --manifest-path gateway/rf-gateway/Cargo.toml  # Gateway tests (Rust)
-python -m compileall services/api/src pipelines/dagster/rfpose_pipelines ml/rfpose
-PYTHONPATH=helios_runner python helios_runner/test_dry_run.py
-npm --prefix dashboard run build                     # Dashboard build check
+DRY_RUN=1 CONFIG=wimose_mmfi17j_proto1_eagle ./scripts/eagle_submit_train.sh
 ```
 
-## Documentation
+### Smoke test
 
-- [`docs/system-overview-vi.md`](docs/system-overview-vi.md) — Chi tiết hệ thống (tiếng Việt)
-- [`docs/final-architecture.md`](docs/final-architecture.md) — Production architecture
-- [`docs/runbook.md`](docs/runbook.md) — Operations runbook
-- [`docs/deployment.md`](docs/deployment.md) — Deployment guide
-- [`docs/security.md`](docs/security.md) — Security posture
-- [`docs/mlops.md`](docs/mlops.md) — MLOps lifecycle
-- [`docs/helios.md`](docs/helios.md) — Helios GH200 HPC
-- [`docs/index.md`](docs/index.md) — Full documentation index
+```bash
+SMOKE=1 CONFIG=quick_test ./scripts/eagle_submit_train.sh
+```
 
-## Production readiness status
+### Common submit environment variables
 
-RF-WorldPose is currently a **production-oriented research codebase**. It has the architecture, contracts, scaffolds, and smoke-test paths required for a serious bring-up.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CONFIG` | `wimose_mmfi17j_proto1_eagle` | Registered training config |
+| `JOB_ID` | timestamped `rfpose-*` | Slurm/checkpoint run id |
+| `DATASET_VERSION` | preset default | Gold dataset version |
+| `GPUS` | preset default | GPU count in rendered sbatch |
+| `CPUS` | preset default | CPU count |
+| `MEM` | preset default | Slurm memory request |
+| `TIME_LIMIT` | preset default | Slurm wall time |
+| `SKIP_DATA` | `0` | Do not rsync local gold data |
+| `FORCE_DATA` | `0` | Re-sync gold data even if remote exists |
+| `DRY_RUN` | `0` | Render sbatch without submitting |
 
-It is not yet a production-proven deployment until the following are validated on real infrastructure:
+## Evaluate Models
 
-- four ESP32-S3 nodes streaming CSI continuously
-- long-running gateway ingestion and Bronze upload
-- real MinIO/Postgres/NATS/Dagster deployment
-- real Helios GH200 Slurm jobs with artifact export
-- ONNX/Triton inference benchmarks
-- mTLS certificates and signed OTA rollout
-- 24-hour soak tests and failure recovery drills
+Run the SOTA/internal comparison job on Eagle:
 
-## License
+```bash
+sbatch scripts/eval_sota_pose_compare.sbatch
+```
 
-Research prototype. Add a formal license before public distribution.
+Outputs:
+
+```text
+eval_results/sota-pose-compare/
+  wimose-proto1-val.json
+  wimose-proto1-test.json
+  rootrel-mmfi-v1-val-pose.json
+  rootrel-mmfi-v1-test-pose.json
+  summary.json
+```
+
+Generate WiMose top-k visualizations:
+
+```bash
+sbatch scripts/viz_wimose_proto1_top.sbatch
+```
+
+Export MLflow curves for thesis/report figures:
+
+```bash
+python scripts/fetch_mlflow_training_curves.py
+```
+
+## API Usage
+
+The FastAPI service exposes control-plane endpoints.
+
+### List training presets
+
+```bash
+curl http://localhost:8080/api/v1/hpc/configs
+```
+
+### Create a job record
+
+```bash
+curl -X POST http://localhost:8080/api/v1/training-jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "wimose-proto1-report-run",
+    "dataset_version": "rfpose-humanlike-v2-proto1",
+    "train_config": "wimose_mmfi17j_proto1_eagle",
+    "submitted_by": "tiencd"
+  }'
+```
+
+### Dry-run submit
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/submit?dry_run=true'
+```
+
+### Submit to Eagle
+
+```bash
+curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/submit
+```
+
+### Refresh/cancel/logs
+
+```bash
+curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/refresh-status
+curl http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/logs
+curl -X POST http://localhost:8080/api/v1/hpc/training-jobs/wimose-proto1-report-run/cancel
+```
+
+## Inference Service
+
+The inference service loads:
+
+```text
+$MODEL_DIR/model.onnx
+```
+
+Endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | liveness and model loaded state |
+| `GET /status` | model IO shapes, NATS, buffer and stats |
+| `POST /predict` | manual CSI window inference |
+| `POST /reload` | reload `model.onnx` from disk |
+| `GET /predictions/recent` | recent NATS realtime predictions |
+
+Manual prediction payload:
+
+```json
+{
+  "csi": [[[0.1, 0.2], [0.3, 0.4]]]
+}
+```
+
+The service now decodes both action logits and pose outputs. Pose outputs with
+shape `(B, J, 3)` are returned as `pose_3d`; `(B, J, 2)` is returned as `pose_2d`.
+
+## Thesis/Report Artifacts
+
+Key generated artifacts:
+
+```text
+viz_output/mlflow_curves/
+viz_output/wimose_proto1_top/
+viz_output/mmfi17j_best/
+eval_results/sota-pose-compare/
+docs/thesis/
+```
+
+Important thesis files currently prepared:
+
+```text
+docs/thesis/chapter2_co_so_ly_thuyet.tex
+docs/thesis/chapter4_3_to_4_6_results_expanded.tex
+```
+
+## Development Checks
+
+Compile Python:
+
+```bash
+python -m compileall eagle_runner services/api/src services/inference/src ml/rfpose
+```
+
+Run API contract tests:
+
+```bash
+PYTHONPATH=services/api/src:eagle_runner pytest services/api/tests
+```
+
+Render a submit dry run:
+
+```bash
+DRY_RUN=1 SKIP_DATA=1 ./scripts/eagle_submit_train.sh
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Wrong model submitted | Config not in registry | Add/update `eagle_runner/rfpose_eagle/registry.py` |
+| Pose visualization is far away or collapsed | Coordinate mismatch | Check `center_pose`, `root_joint`, CSI mean/std metadata |
+| Proto1 action stuck at 18-19% | Majority baseline behavior | Use RootRel/unified-v2 for action, or redesign Proto1 action training |
+| Slurm shows FAILED after checkpoint exists | DDP teardown or post-train failure | Check `best.pt`, eval checkpoint before resubmit |
+| MLflow logging too slow | Logging per batch | Log metrics per epoch for long jobs |
+| Inference says no model loaded | Missing `model.onnx` | Copy/export model to `$MODEL_DIR/model.onnx`, then `POST /reload` |
+
+## Current Research Position
+
+Use this wording in reports:
+
+1. **WiMose Proto1 is the strongest pose model in the RF-WorldPose pipeline** and
+   beats the reproduced/internal baselines under the MM-Fi Protocol 1 setup.
+2. **Single-task training is better for pose regression** in the current
+   experiments. **Multitask training is better suited for action classification**
+   because pose/motion supervision enriches the action representation.
+
+Avoid claiming a global SOTA result unless the comparison uses the exact same
+dataset, skeleton, split, preprocessing and evaluation protocol as the external
+paper.

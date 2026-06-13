@@ -3,45 +3,27 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
+from rfpose_eagle.registry import get_preset, resolve_train_module
+
 TEMPLATE = Path(__file__).resolve().parents[1] / "templates" / "train_eagle.sbatch"
-
-CONFIG_TO_MODULE = {
-    "transformer_gold": "rfpose.training.transformer_train",
-    "transformer_eagle": "rfpose.training.transformer_train",
-    "ssl_cnn": "rfpose.training.transformer_train",
-    "ssl_pretrain": "rfpose.training.ssl_pretrain",
-    "ssl_eagle": "rfpose.training.ssl_pretrain",
-    "finetune_room": "rfpose.training.transformer_train",
-    "quick_test": "rfpose.training.transformer_train",
-    "demo": "rfpose.training.transformer_train",
-    "eval_demo": "rfpose.evaluation.eval_job",
-    "vit2d_wipose_eagle": "rfpose.training.train_vit2d",
-    "vit2d_mmfi_eagle": "rfpose.training.train_vit2d"
-}
-
-
-def resolve_train_module(config_name: str, explicit_module: str = "") -> str:
-    if explicit_module:
-        return explicit_module
-    return CONFIG_TO_MODULE.get(config_name, "rfpose.training.transformer_train")
 
 
 @dataclass(frozen=True)
 class EagleJobSpec:
     job_id: str
-    config_name: str = "transformer_eagle"
+    config_name: str = "wimose_mmfi17j_proto1_eagle"
     train_module: str = ""
-    dataset_version: str = "rfpose-multitask-v1"
+    dataset_version: str = ""
     project_root: str = "pl0501-01/project_data/rf-worldpose"
-    partition: str = "proxima"
-    gpu_type: str = "h100"
-    gpus: int = 1
-    cpus: int = 8
-    mem: str = "32G"
-    time_limit: str = "24:00:00"
+    partition: str = ""
+    gpu_type: str = ""
+    gpus: int = 0
+    cpus: int = 0
+    mem: str = ""
+    time_limit: str = ""
     mlflow_tracking_uri: str = "http://207.180.243.242:5000"
     epochs: int = 50
     batch_size: int = 32
@@ -57,16 +39,24 @@ def _ssh_opts(ssh_key: str = "") -> list[str]:
 
 def render_sbatch(spec: EagleJobSpec) -> str:
     text = TEMPLATE.read_text()
+    preset = get_preset(spec.config_name)
     module = resolve_train_module(spec.config_name, spec.train_module)
+    dataset_version = spec.dataset_version or preset.dataset_version
+    partition = spec.partition or preset.partition
+    gpu_type = spec.gpu_type or preset.gpu_type
+    gpus = spec.gpus or preset.gpus
+    cpus = spec.cpus or preset.cpus
+    mem = spec.mem or preset.mem
+    time_limit = spec.time_limit or preset.time_limit
     replacements = {
-        "{{ partition }}": spec.partition,
-        "{{ gpu_type }}": spec.gpu_type,
-        "{{ gpus }}": str(spec.gpus),
-        "{{ cpus }}": str(spec.cpus),
-        "{{ mem }}": spec.mem,
-        "{{ time_limit }}": spec.time_limit,
+        "{{ partition }}": partition,
+        "{{ gpu_type }}": gpu_type,
+        "{{ gpus }}": str(gpus),
+        "{{ cpus }}": str(cpus),
+        "{{ mem }}": mem,
+        "{{ time_limit }}": time_limit,
         "{{ project_root }}": spec.project_root,
-        "{{ dataset_version }}": spec.dataset_version,
+        "{{ dataset_version }}": dataset_version,
         "{{ mlflow_tracking_uri }}": spec.mlflow_tracking_uri,
         "{{ job_id }}": spec.job_id,
         "{{ epochs }}": str(spec.epochs),

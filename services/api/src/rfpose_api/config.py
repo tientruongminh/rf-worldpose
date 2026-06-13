@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     hpc_user: str = Field(default="tiencd1234", alias="HPC_USER")
     hpc_ssh_key: str = Field(default="/root/.ssh/id_ed25519", alias="HPC_SSH_KEY")
     hpc_account: str = Field(default="pl0501-01", alias="HPC_ACCOUNT")
-    hpc_partition: str = Field(default="proxima", alias="HPC_PARTITION")
+    hpc_partition: str = Field(default="tesla", alias="HPC_PARTITION")
     hpc_work_dir: str = Field(default="~/pl0501-01/project_data/rf-worldpose", alias="HPC_WORK_DIR")
 
     # S3 / MinIO

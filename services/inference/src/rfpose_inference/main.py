@@ -37,6 +37,14 @@ ACTION_LABELS = {
     10: "throw", 11: "catch", 12: "kick", 13: "punch", 14: "push", 15: "pull",
 }
 
+MMFI_ACTION_LABELS = {
+    0: "walk", 1: "run", 2: "sit_down", 3: "stand_up", 4: "fall", 5: "jump",
+    6: "squat", 7: "bend", 8: "hand_clap", 9: "wave", 10: "phone_call",
+    11: "drink_water", 12: "throw", 13: "pick_up", 14: "push", 15: "pull",
+    16: "kick", 17: "toss_paper", 18: "draw_x", 19: "draw_tick",
+    20: "rotation", 21: "nothing",
+}
+
 app = FastAPI(title="RF-WorldPose Inference Service", version="0.2.0")
 
 _session: ort.InferenceSession | None = None
@@ -76,6 +84,42 @@ def softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _looks_like_logits(output: np.ndarray) -> bool:
+    if output.ndim != 2 or output.shape[0] != 1:
+        return False
+    return 2 <= output.shape[1] <= 64
+
+
+def _looks_like_pose(output: np.ndarray) -> bool:
+    if output.ndim == 3 and output.shape[-1] in {2, 3}:
+        return True
+    if output.ndim == 2 and output.shape[0] == 1 and output.shape[1] in {34, 39, 51}:
+        return True
+    return False
+
+
+def _decode_pose(output: np.ndarray) -> dict:
+    pose = output[0] if output.ndim >= 3 else output.reshape(1, -1)[0]
+    if pose.ndim == 1:
+        dims = 3 if pose.size % 3 == 0 else 2
+        pose = pose.reshape(-1, dims)
+    key = "pose_3d" if pose.shape[-1] == 3 else "pose_2d"
+    return {key: pose.astype(float).tolist()}
+
+
+def _decode_action(output: np.ndarray) -> dict:
+    logits = output[0]
+    probs = softmax(logits)
+    action_id = int(np.argmax(probs))
+    labels = MMFI_ACTION_LABELS if len(probs) == len(MMFI_ACTION_LABELS) else ACTION_LABELS
+    return {
+        "action_id": action_id,
+        "action": labels.get(action_id, f"class_{action_id}"),
+        "confidence": float(probs[action_id]),
+        "probabilities": {str(i): round(float(p), 4) for i, p in enumerate(probs)},
+    }
+
+
 def run_inference(csi: np.ndarray) -> dict:
     """Run inference on a CSI window. Returns prediction dict."""
     session = get_session()
@@ -91,17 +135,14 @@ def run_inference(csi: np.ndarray) -> dict:
 
     result: dict = {"timestamp": time.time(), "model": "model.onnx"}
 
-    logits = outputs[0]
-    if logits.ndim >= 2:
-        probs = softmax(logits[0])
-        action_id = int(np.argmax(probs))
-        result["action_id"] = action_id
-        result["action"] = ACTION_LABELS.get(action_id, f"class_{action_id}")
-        result["confidence"] = float(probs[action_id])
-        result["probabilities"] = {str(i): round(float(p), 4) for i, p in enumerate(probs)}
+    for output in outputs:
+        arr = np.asarray(output)
+        if _looks_like_logits(arr) and "action" not in result:
+            result.update(_decode_action(arr))
+        elif _looks_like_pose(arr) and "pose_2d" not in result and "pose_3d" not in result:
+            result.update(_decode_pose(arr))
 
-    if len(outputs) > 1 and outputs[1].ndim >= 2:
-        result["pose_2d"] = outputs[1][0].tolist()
+    result["output_shapes"] = [list(np.asarray(o).shape) for o in outputs]
 
     return result
 
@@ -227,7 +268,9 @@ class PredictResponse(BaseModel):
     confidence: float | None = None
     probabilities: dict[str, float] = Field(default_factory=dict)
     pose_2d: list[list[float]] | None = None
+    pose_3d: list[list[float]] | None = None
     model: str = ""
+    output_shapes: list[list[int]] = Field(default_factory=list)
     error: str | None = None
 
 

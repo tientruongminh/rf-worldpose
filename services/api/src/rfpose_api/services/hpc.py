@@ -9,8 +9,10 @@ from typing import Any
 
 from rfpose_api.config import settings
 from rfpose_api.repositories import training_jobs as job_repo
+from rfpose_eagle.registry import get_preset
+from rfpose_eagle.submit import EagleJobSpec, submit_training_job
 from rfpose_api.services.ssh_executor import (
-    HpcJobSpec, submit_training_job, submit_script,
+    submit_script,
     test_connection, list_remote_scripts,
     slurm_status, slurm_job_detail, fetch_slurm_logs,
     cancel_job,
@@ -56,20 +58,27 @@ def submit_existing_script(script_name: str) -> str:
 
 def submit_job(job: dict, *, preset_config: dict | None = None, dry_run: bool = False) -> str:
     """Render sbatch from job + optional preset, submit to HPC. Returns sbatch text (dry_run) or Slurm ID."""
-    spec = HpcJobSpec(
+    preset = get_preset(job["train_config"])
+    spec = EagleJobSpec(
         job_id=job["id"],
-        dataset_version=job["dataset_version"],
+        dataset_version=job.get("dataset_version") or preset.dataset_version,
         train_config=job["train_config"],
-        account=settings.hpc_account,
         partition=settings.hpc_partition,
-        s3_bucket=settings.s3_bucket,
-        s3_endpoint_url=settings.s3_endpoint_url,
+        gpus=preset.gpus,
+        cpus=preset.cpus,
+        mem=preset.mem,
+        time_limit=preset.time_limit,
         mlflow_tracking_uri=settings.mlflow_tracking_uri,
-        script_path=preset_config["script_path"] if preset_config else "",
-        git_repo=preset_config["git_repo"] if preset_config else "",
-        git_branch=preset_config["git_branch"] if preset_config else "main",
     )
-    return submit_training_job(spec, login=_login, ssh_key=_ssh_key, remote_dir=_work_dir, dry_run=dry_run)
+    return submit_training_job(
+        spec,
+        ssh_host=_login,
+        ssh_key=_ssh_key,
+        remote_dir=_work_dir,
+        repo_root="/app",
+        sync=not dry_run,
+        dry_run=dry_run,
+    )
 
 
 def submit_and_record(job: dict, *, preset_config: dict | None = None, dry_run: bool = False) -> dict[str, Any]:
