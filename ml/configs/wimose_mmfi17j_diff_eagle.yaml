@@ -1,0 +1,57 @@
+# WiMose Diffusion Decoder on MM-Fi — Phase 2 (after MAE pretraining)
+#
+# Key ideas:
+#   - WiFi encoder (ViT, same arch as MAE) conditions each denoising step
+#   - DDPM T=1000 training, DDIM T=20 fast inference
+#   - n_hypotheses_val=5: best-of-5 MPJPE at validation (expected ~40% better than n=1)
+#   - Load pretrained encoder via training.pretrained_encoder (path set in sbatch)
+
+data:
+  gold_dir: "/tmp/rfpose_gold_mmfi_diff_SLURM_JOB_ID"
+  datasets: ["mmfi"]
+  n_joints: 17
+  n_subcarriers: 342
+  window_size: 60
+  augment: true
+  require_pose: true
+  normalize_csi: true
+  center_pose: true
+  root_joint: 0
+
+model:
+  # Noise schedule
+  T: 1000
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  # WiFi encoder (ViT, same dims as MAE encoder for weight loading)
+  encoder_dim: 384    # must match MAE encoder_dim
+  patch_h: 18
+  patch_w: 6
+  # DiT denoiser
+  dit_d_model: 256
+  dit_n_layers: 8
+  dit_n_heads: 8
+  t_embed_dim: 256
+
+training:
+  device: "cuda"
+  epochs: 200
+  batch_size: 32
+  lr: 5.0e-5           # lower LR since encoder is (partially) pretrained
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  freeze_encoder_epochs: 10   # freeze encoder for first 10 epochs (let DiT warm up first)
+  patience: 40
+  save_every: 10
+  amp: true
+  num_workers: 4
+  seed: 42
+  n_ddim_steps: 20     # DDIM steps at validation
+  n_hypotheses_val: 5  # best-of-5 MPJPE at validation
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-diff-v1"
+  pretrained_encoder: ""  # set by sbatch via training.pretrained_encoder=...
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-diffusion"
+  run_name: "wimose-mmfi17j-diff-v1"

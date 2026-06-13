@@ -38,14 +38,18 @@ import torch
 import torch.nn as nn
 import torch.amp as amp
 from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data.distributed import DistributedSampler
 
 import mlflow
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from rfpose.models.csi_tokenizer import CSITokenizer
-from rfpose.models.transformer import CSITransformerPose
+from rfpose.models.transformer import CSITransformerPose, SpatialEncoder, TemporalEncoder
+from rfpose.models.cnn_embedding_head import CSIEncoderCNNModel, TemporalCNNHead
 from rfpose.data.gold_npz_dataset import build_gold_train_val, NUM_ACTIONS
+from rfpose.training.gold_batch_prep import compute_csi_stats, prepare_transformer_batch
+from rfpose.training.ddp_helpers import setup_ddp, cleanup_ddp, wrap_ddp, unwrap_module
 from rfpose.utils.losses import RFPoseLoss, LossConfig, MPJPE, PA_MPJPE, skeleton_for_joints
 
 log = logging.getLogger(__name__)
@@ -319,7 +323,12 @@ class CSIPoseDataset(Dataset):
 # ===========================================================================
 # Training utilities
 # ===========================================================================
-def build_dataloaders(cfg: DictConfig, device: torch.device):
+def build_dataloaders(
+    cfg: DictConfig,
+    device: torch.device,
+    rank: int = 0,
+    world_size: int = 1,
+):
     """Build train/val DataLoaders from Gold NPZ or legacy Parquet."""
     data_format = cfg.data.get("format", "parquet")
 
@@ -327,6 +336,7 @@ def build_dataloaders(cfg: DictConfig, device: torch.device):
         datasets = cfg.data.get("datasets")
         if datasets is not None:
             datasets = list(datasets)
+        val_splits = tuple(cfg.data.get("val_splits", ("val",)))
         train_dataset, val_dataset = build_gold_train_val(
             cfg.data.gold_dir,
             val_ratio=cfg.data.val_ratio,
@@ -335,6 +345,7 @@ def build_dataloaders(cfg: DictConfig, device: torch.device):
             augment=cfg.data.augment,
             require_pose=cfg.data.get("require_pose", False),
             require_action=cfg.data.get("require_action", False),
+            val_splits=val_splits,
         )
     else:
         full_dataset = CSIPoseDataset(
@@ -356,10 +367,15 @@ def build_dataloaders(cfg: DictConfig, device: torch.device):
 
     pin = device.type == "cuda"
     nw = cfg.training.num_workers
+    train_sampler = (
+        DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        if world_size > 1 else None
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=nw,
         pin_memory=pin,
         drop_last=True,
@@ -395,7 +411,8 @@ def build_loss_fn(cfg: DictConfig) -> RFPoseLoss:
     return RFPoseLoss(loss_cfg)
 
 
-def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransformerPose]:
+def build_model_and_tokenizer(cfg: DictConfig) -> tuple[Optional[CSITokenizer], nn.Module]:
+    arch = cfg.model.get("arch", "transformer")
     tokenizer = CSITokenizer(
         n_subcarriers=cfg.data.n_subcarriers,
         patch_size=cfg.model.patch_size,
@@ -404,6 +421,43 @@ def build_model_and_tokenizer(cfg: DictConfig) -> tuple[CSITokenizer, CSITransfo
         n_nodes=cfg.data.n_nodes,
         dropout=cfg.model.dropout,
     )
+
+    if arch == "ssl_cnn":
+        spatial_encoder = SpatialEncoder(
+            d_model=cfg.model.d_model,
+            n_heads=cfg.model.spatial_heads,
+            n_layers=cfg.model.n_spatial_layers,
+            ffn_mult=cfg.model.ffn_mult,
+            dropout=cfg.model.dropout,
+        )
+        temporal_encoder = TemporalEncoder(
+            d_model=cfg.model.d_model,
+            n_heads=cfg.model.temporal_heads,
+            n_layers=cfg.model.n_temporal_layers,
+            ffn_mult=cfg.model.ffn_mult,
+            dropout=cfg.model.dropout,
+            causal=cfg.model.get("causal_temporal", cfg.model.get("causal", False)),
+        )
+        cnn_head = TemporalCNNHead(
+            d_model=cfg.model.d_model,
+            hidden_dim=cfg.model.get("cnn_hidden_dim", cfg.model.d_model),
+            n_layers=cfg.model.get("cnn_layers", 2),
+            kernel_size=cfg.model.get("cnn_kernel_size", 3),
+            dropout=cfg.model.dropout,
+            n_joints=cfg.data.n_joints,
+            num_actions=cfg.model.get("num_actions", NUM_ACTIONS),
+        )
+        model = CSIEncoderCNNModel(
+            tokenizer=tokenizer,
+            spatial_encoder=spatial_encoder,
+            temporal_encoder=temporal_encoder,
+            spatial_to_temporal_norm=nn.LayerNorm(cfg.model.d_model),
+            cnn_head=cnn_head,
+        )
+        return None, model
+
+    if arch != "transformer":
+        raise ValueError(f"Unsupported model.arch: {arch}")
 
     model = CSITransformerPose(
         n_patches=tokenizer.n_patches,
@@ -450,8 +504,8 @@ def load_ssl_pretrained(
 
 
 def load_pretrained_full(
-    tokenizer: CSITokenizer,
-    model: CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model: nn.Module,
     checkpoint: str,
     freeze_encoder: bool = False,
 ) -> None:
@@ -461,14 +515,16 @@ def load_pretrained_full(
     metrics = ckpt.get("metrics", {})
     log.info(f"Loading pretrained full model from {checkpoint} (epoch={epoch})")
 
-    tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
+    if tokenizer is not None and "tokenizer" in ckpt:
+        tokenizer.load_state_dict(ckpt["tokenizer"], strict=False)
     model.load_state_dict(ckpt["model"], strict=False)
 
     mpjpe = metrics.get("val_mpjpe", "?")
     log.info(f"Full model loaded (val_mpjpe={mpjpe}). freeze_encoder={freeze_encoder}")
 
-    if freeze_encoder:
-        _freeze_encoder(tokenizer, model)
+    freeze_tokenizer = tokenizer if tokenizer is not None else getattr(model, "tokenizer", None)
+    if freeze_encoder and freeze_tokenizer is not None:
+        _freeze_encoder(freeze_tokenizer, model)
 
 
 def _freeze_encoder(tokenizer: CSITokenizer, model: CSITransformerPose) -> None:
@@ -485,7 +541,7 @@ def _freeze_encoder(tokenizer: CSITokenizer, model: CSITransformerPose) -> None:
 
 
 def build_optimizer(
-    model: nn.Module, tokenizer: nn.Module, cfg: DictConfig,
+    model: nn.Module, tokenizer: nn.Module | None, cfg: DictConfig,
     loss_fn: nn.Module | None = None,
 ):
     """AdamW với weight decay chỉ cho non-bias, non-norm parameters."""
@@ -493,6 +549,8 @@ def build_optimizer(
     params_no_decay = []
 
     for module in [tokenizer, model]:
+        if module is None:
+            continue
         for name, param in module.named_parameters():
             if not param.requires_grad:
                 continue
@@ -534,8 +592,8 @@ def build_scheduler(optimizer, cfg: DictConfig, n_steps_per_epoch: int):
 
 def save_checkpoint(
     epoch: int,
-    tokenizer: CSITokenizer,
-    model: CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model: nn.Module,
     optimizer,
     scheduler,
     metrics: dict,
@@ -544,13 +602,15 @@ def save_checkpoint(
 ):
     checkpoint = {
         "epoch":     epoch,
-        "tokenizer": tokenizer.state_dict(),
-        "model":     model.state_dict(),
+        "model":     unwrap_module(model).state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "metrics":   metrics,
         "config":    OmegaConf.to_container(cfg),
     }
+    tok = unwrap_module(tokenizer)
+    if tok is not None:
+        checkpoint["tokenizer"] = tok.state_dict()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, path)
     log.info(f"Checkpoint saved: {path}")
@@ -558,7 +618,8 @@ def save_checkpoint(
 
 def load_checkpoint(path: str, tokenizer, model, optimizer, scheduler):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    tokenizer.load_state_dict(checkpoint["tokenizer"])
+    if tokenizer is not None and "tokenizer" in checkpoint:
+        tokenizer.load_state_dict(checkpoint["tokenizer"])
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
@@ -570,8 +631,8 @@ def load_checkpoint(path: str, tokenizer, model, optimizer, scheduler):
 # Train / Eval loop
 # ===========================================================================
 def train_one_epoch(
-    tokenizer:  CSITokenizer,
-    model:      CSITransformerPose,
+    tokenizer:  Optional[CSITokenizer],
+    model:      nn.Module,
     loader:     DataLoader,
     optimizer:  torch.optim.Optimizer,
     scheduler,
@@ -580,9 +641,15 @@ def train_one_epoch(
     scaler:     amp.GradScaler,
     cfg:        DictConfig,
     epoch:      int,
+    csi_mean:   torch.Tensor | None = None,
+    csi_std:    torch.Tensor | None = None,
+    root_joint: int = 0,
+    center_pose: bool = False,
+    rank: int = 0,
 ) -> dict[str, float]:
 
-    tokenizer.train()
+    if tokenizer is not None:
+        tokenizer.train()
     model.train()
 
     lambda_action = cfg.loss.get("lambda_action", 0.0)
@@ -592,15 +659,18 @@ def train_one_epoch(
     n_batches = 0
 
     for batch_idx, batch in enumerate(loader):
-        csi       = batch["csi"].to(device, non_blocking=True)
-        gt_coords = batch["coords"].to(device, non_blocking=True)
-        gt_vis    = batch["vis"].to(device, non_blocking=True)
+        csi, gt_coords, gt_vis = prepare_transformer_batch(
+            batch, device, csi_mean, csi_std, root_joint, center_pose,
+        )
 
         optimizer.zero_grad(set_to_none=True)
 
         with amp.autocast(device_type=device.type, enabled=cfg.training.amp):
-            tokens    = tokenizer(csi)
-            out       = model(tokens)
+            if tokenizer is None:
+                out = model(csi)
+            else:
+                tokens = tokenizer(csi)
+                out = model(tokens)
 
             pred_dict = {
                 "coords":     out["coords"],
@@ -621,10 +691,10 @@ def train_one_epoch(
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(
-            list(tokenizer.parameters()) + list(model.parameters()) + list(loss_fn.parameters()),
-            max_norm=cfg.training.grad_clip,
-        )
+        clip_params = list(model.parameters()) + list(loss_fn.parameters())
+        if tokenizer is not None:
+            clip_params += list(tokenizer.parameters())
+        torch.nn.utils.clip_grad_norm_(clip_params, max_norm=cfg.training.grad_clip)
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -633,7 +703,7 @@ def train_one_epoch(
             total_metrics[k] = total_metrics.get(k, 0.0) + v
         n_batches += 1
 
-        if batch_idx % cfg.training.log_every == 0:
+        if rank == 0 and batch_idx % cfg.training.log_every == 0:
             lr = scheduler.get_last_lr()[0]
             action_str = f" action={breakdown.get('loss_action', 0):.4f}" if "loss_action" in breakdown else ""
             log.info(
@@ -654,15 +724,20 @@ def train_one_epoch(
 
 @torch.no_grad()
 def eval_one_epoch(
-    tokenizer: CSITokenizer,
-    model:     CSITransformerPose,
+    tokenizer: Optional[CSITokenizer],
+    model:     nn.Module,
     loader:    DataLoader,
     loss_fn:   RFPoseLoss,
     device:    torch.device,
     cfg:       DictConfig,
+    csi_mean:  torch.Tensor | None = None,
+    csi_std:   torch.Tensor | None = None,
+    root_joint: int = 0,
+    center_pose: bool = False,
 ) -> dict[str, float]:
 
-    tokenizer.eval()
+    if tokenizer is not None:
+        tokenizer.eval()
     model.eval()
 
     mpjpe_fn    = MPJPE()
@@ -675,12 +750,15 @@ def eval_one_epoch(
     n_batches = 0
 
     for batch in loader:
-        csi       = batch["csi"].to(device)
-        gt_coords = batch["coords"].to(device)
-        gt_vis    = batch["vis"].to(device)
+        csi, gt_coords, gt_vis = prepare_transformer_batch(
+            batch, device, csi_mean, csi_std, root_joint, center_pose,
+        )
 
-        tokens = tokenizer(csi)
-        out    = model(tokens)
+        if tokenizer is None:
+            out = model(csi)
+        else:
+            tokens = tokenizer(csi)
+            out = model(tokens)
 
         pred_dict = {"coords": out["coords"], "vis_logits": out["vis_logits"]}
         gt_dict   = {"coords": gt_coords,     "vis": gt_vis}
@@ -724,44 +802,104 @@ def eval_one_epoch(
 # ===========================================================================
 @hydra.main(config_path="../../configs", config_name="transformer_gold", version_base=None)
 def train(cfg: DictConfig) -> None:
-    log.info(f"\n{'='*60}")
-    log.info("RF-WorldPose Transformer Training")
-    log.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
-    log.info(f"{'='*60}")
+    rank, local_rank, world_size = setup_ddp()
+    is_main = rank == 0
 
-    device = torch.device(cfg.training.device if torch.cuda.is_available() else "cpu")
-    log.info(f"Device: {device}")
+    if is_main:
+        log.info(f"\n{'='*60}")
+        log.info("RF-WorldPose Transformer Training")
+        log.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
+        log.info(f"world_size={world_size}")
+        log.info(f"{'='*60}")
+    else:
+        logging.getLogger().setLevel(logging.WARNING)
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+
+    if is_main:
+        log.info(f"Device: {device}")
+        if device.type == "cuda":
+            log.info(f"GPU: {torch.cuda.get_device_name(local_rank)}")
+            log.info(f"VRAM: {torch.cuda.get_device_properties(local_rank).total_memory / 1e9:.1f} GB")
+
+    torch.manual_seed(cfg.training.seed + rank)
     if device.type == "cuda":
-        log.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        log.info(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        torch.cuda.manual_seed_all(cfg.training.seed + rank)
 
-    torch.manual_seed(cfg.training.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(cfg.training.seed)
+    train_loader, val_loader, n_train, n_val = build_dataloaders(
+        cfg, device, rank=rank, world_size=world_size,
+    )
 
-    train_loader, val_loader, n_train, n_val = build_dataloaders(cfg, device)
-    log.info(f"Train samples: {n_train} | Val samples: {n_val} | format={cfg.data.get('format', 'parquet')}")
+    if is_main:
+        log.info(f"Train samples: {n_train} | Val samples: {n_val} | format={cfg.data.get('format', 'parquet')}")
+
+    normalize_csi = cfg.data.get("normalize_csi", False)
+    center_pose = cfg.data.get("center_pose", False)
+    root_joint = int(cfg.data.get("root_joint", 0))
+    csi_mean, csi_std = None, None
+    if normalize_csi and cfg.data.get("format") == "gold_npz":
+        csi_mean, csi_std = compute_csi_stats(
+            train_loader.dataset,
+            n_sample=256,
+            seed=cfg.training.seed,
+        )
+        if device.type == "cuda":
+            csi_mean = csi_mean.to(device)
+            csi_std = csi_std.to(device)
+        if is_main:
+            log.info(
+                "CSI norm  mean=%s  std=%s | center_pose=%s root_joint=%d",
+                csi_mean.view(-1).tolist(),
+                csi_std.view(-1).tolist(),
+                center_pose,
+                root_joint,
+            )
 
     # Model
     tokenizer, model = build_model_and_tokenizer(cfg)
+    arch = cfg.model.get("arch", "transformer")
 
     # Load pretrained weights (Phase 2 full model OR Phase 1 SSL encoder)
     pretrained_from = cfg.training.get("pretrained_from", "")
-    ssl_ckpt = cfg.training.get("ssl_pretrained", "")
+    ssl_ckpt = cfg.training.get("ssl_pretrained", "") or cfg.model.get("ssl_checkpoint", "")
     freeze = cfg.training.get("freeze_encoder", False)
 
+    encoder_frozen = False
     if pretrained_from and Path(pretrained_from).exists():
         load_pretrained_full(tokenizer, model, pretrained_from, freeze_encoder=freeze)
+        encoder_frozen = freeze
     elif ssl_ckpt and Path(ssl_ckpt).exists():
-        load_ssl_pretrained(tokenizer, model, ssl_ckpt, freeze_encoder=freeze)
+        ssl_tokenizer = tokenizer if tokenizer is not None else model.tokenizer
+        load_ssl_pretrained(ssl_tokenizer, model, ssl_ckpt, freeze_encoder=freeze)
+        encoder_frozen = freeze
+    elif ssl_ckpt and is_main:
+        log.warning(f"SSL pretrained checkpoint not found: {ssl_ckpt}")
 
-    tokenizer = tokenizer.to(device)
-    model     = model.to(device)
+    if arch == "ssl_cnn" and freeze and not encoder_frozen:
+        _freeze_encoder(model.tokenizer, model)
 
-    trainable_tok = sum(p.numel() for p in tokenizer.parameters() if p.requires_grad)
-    trainable_mod = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log.info(f"Tokenizer params: {trainable_tok:,} (trainable)")
-    log.info(f"Model params:     {trainable_mod:,} (trainable)")
+    if tokenizer is not None:
+        tokenizer = tokenizer.to(device)
+    model = model.to(device)
+    if world_size > 1:
+        if tokenizer is not None:
+            tokenizer = wrap_ddp(tokenizer, local_rank, world_size)
+        model = wrap_ddp(model, local_rank, world_size)
+
+    if is_main:
+        raw_tok = unwrap_module(tokenizer)
+        raw_mod = unwrap_module(model)
+        trainable_tok = sum(p.numel() for p in raw_tok.parameters() if p.requires_grad) if raw_tok else 0
+        trainable_mod = sum(p.numel() for p in raw_mod.parameters() if p.requires_grad)
+        frozen_tok = sum(p.numel() for p in raw_tok.parameters() if not p.requires_grad) if raw_tok else 0
+        frozen_mod = sum(p.numel() for p in raw_mod.parameters() if not p.requires_grad)
+        log.info(f"Tokenizer params: {trainable_tok:,} trainable | {frozen_tok:,} frozen")
+        log.info(f"Model params:     {trainable_mod:,} trainable | {frozen_mod:,} frozen")
+        if arch == "ssl_cnn":
+            log.info(f"Total params:     {trainable_mod:,} trainable | {frozen_mod:,} frozen")
 
     loss_fn = build_loss_fn(cfg).to(device)
 
@@ -782,78 +920,108 @@ def train(cfg: DictConfig) -> None:
         best_mpjpe  = prev_metrics.get("val_mpjpe", float("inf"))
         start_epoch += 1
 
-    # MLflow tracking
-    mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
-    mlflow.set_experiment(cfg.mlflow.experiment_name)
+    ckpt_dir = Path(cfg.training.get("checkpoint_dir") or "checkpoints")
+    if is_main:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    with mlflow.start_run(run_name=cfg.mlflow.run_name):
+    if is_main:
+        mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
+        mlflow.set_experiment(cfg.mlflow.experiment_name)
+        mlflow.start_run(run_name=cfg.mlflow.run_name)
         mlflow.log_params(OmegaConf.to_container(cfg.model, resolve=True))
         mlflow.log_params(OmegaConf.to_container(cfg.training, resolve=True))
         mlflow.log_params(OmegaConf.to_container(cfg.loss, resolve=True))
 
-        patience_counter = 0
-
+    patience_counter = 0
+    try:
         for epoch in range(start_epoch, cfg.training.epochs):
+            if isinstance(train_loader.sampler, DistributedSampler):
+                train_loader.sampler.set_epoch(epoch)
             t0 = time.time()
 
             train_metrics = train_one_epoch(
                 tokenizer, model, train_loader,
                 optimizer, scheduler, loss_fn,
                 device, scaler, cfg, epoch,
+                csi_mean=csi_mean, csi_std=csi_std,
+                root_joint=root_joint, center_pose=center_pose,
+                rank=rank,
             )
 
-            val_metrics = eval_one_epoch(
-                tokenizer, model, val_loader,
-                loss_fn, device, cfg,
-            )
-
-            epoch_time = time.time() - t0
-            all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "epoch_time": epoch_time}
-
-            mlflow.log_metrics(all_metrics, step=epoch)
-
-            log.info(
-                f"Epoch {epoch:03d}/{cfg.training.epochs} "
-                f"[{epoch_time:.1f}s] "
-                f"train_loss={train_metrics['loss_total']:.4f} "
-                f"val_mpjpe={val_metrics['val_mpjpe']:.4f} "
-                f"val_pa_mpjpe={val_metrics['val_pa_mpjpe']:.4f}"
-            )
-
-            val_mpjpe = val_metrics["val_mpjpe"]
-            if val_mpjpe < best_mpjpe:
-                best_mpjpe       = val_mpjpe
-                patience_counter = 0
-                best_ckpt        = "checkpoints/best.pt"
-                save_checkpoint(epoch, tokenizer, model, optimizer, scheduler, all_metrics, cfg, best_ckpt)
-                mlflow.log_artifact(best_ckpt)
-                log.info(f"  New best MPJPE: {best_mpjpe:.4f}")
-            else:
-                patience_counter += 1
-                log.info(f"  No improvement. Patience: {patience_counter}/{cfg.training.patience}")
-
-            if epoch % cfg.training.save_every == 0:
-                save_checkpoint(
-                    epoch, tokenizer, model, optimizer, scheduler,
-                    all_metrics, cfg, f"checkpoints/epoch_{epoch:03d}.pt",
+            val_metrics: dict[str, float] = {}
+            if is_main:
+                val_metrics = eval_one_epoch(
+                    tokenizer, model, val_loader,
+                    loss_fn, device, cfg,
+                    csi_mean=csi_mean, csi_std=csi_std,
+                    root_joint=root_joint, center_pose=center_pose,
                 )
 
-            if patience_counter >= cfg.training.patience:
-                log.info(f"Early stopping tại epoch {epoch}")
+            if world_size > 1:
+                import torch.distributed as dist
+                dist.barrier()
+
+            if is_main:
+                epoch_time = time.time() - t0
+                all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "epoch_time": epoch_time}
+                mlflow.log_metrics(all_metrics, step=epoch)
+                log.info(
+                    f"Epoch {epoch:03d}/{cfg.training.epochs} "
+                    f"[{epoch_time:.1f}s] "
+                    f"train_loss={train_metrics['loss_total']:.4f} "
+                    f"val_mpjpe={val_metrics['val_mpjpe']:.4f} "
+                    f"val_pa_mpjpe={val_metrics['val_pa_mpjpe']:.4f}"
+                )
+
+                val_mpjpe = val_metrics["val_mpjpe"]
+                if val_mpjpe < best_mpjpe:
+                    best_mpjpe = val_mpjpe
+                    patience_counter = 0
+                    best_ckpt = str(ckpt_dir / "best.pt")
+                    save_checkpoint(epoch, tokenizer, model, optimizer, scheduler, all_metrics, cfg, best_ckpt)
+                    mlflow.log_artifact(best_ckpt, artifact_path="checkpoints")
+                    log.info(f"  New best MPJPE: {best_mpjpe:.4f}")
+                else:
+                    patience_counter += 1
+                    log.info(f"  No improvement. Patience: {patience_counter}/{cfg.training.patience}")
+
+                if epoch % cfg.training.save_every == 0:
+                    epoch_ckpt = str(ckpt_dir / f"epoch_{epoch:03d}.pt")
+                    save_checkpoint(
+                        epoch, tokenizer, model, optimizer, scheduler,
+                        all_metrics, cfg, epoch_ckpt,
+                    )
+                    mlflow.log_artifact(epoch_ckpt, artifact_path="checkpoints")
+
+            should_stop = 0
+            if is_main and (patience_counter >= cfg.training.patience or cfg.training.dry_run):
+                should_stop = 1
+            if world_size > 1:
+                import torch.distributed as dist
+                flag = torch.tensor([should_stop], device=device, dtype=torch.long)
+                dist.broadcast(flag, src=0)
+                should_stop = int(flag.item())
+            if should_stop:
+                if is_main:
+                    log.info(f"Early stopping tại epoch {epoch}" if patience_counter >= cfg.training.patience else "Dry run complete.")
                 break
 
-            if cfg.training.dry_run:
-                log.info("Dry run complete.")
-                break
-
-        # Export ONNX
-        if not cfg.training.dry_run:
+        if is_main and not cfg.training.dry_run and arch == "transformer":
             log.info("Exporting model to ONNX...")
-            _export_onnx(tokenizer, model, cfg, device)
-            mlflow.log_artifact("checkpoints/model.onnx")
+            _export_onnx(unwrap_module(tokenizer), unwrap_module(model), cfg, device)
+            onnx_path = ckpt_dir / "model.onnx"
+            if onnx_path.exists():
+                mlflow.log_artifact(str(onnx_path))
+        elif is_main and arch != "transformer":
+            log.info("Skipping ONNX export for model.arch=%s", arch)
 
-        log.info(f"Training complete. Best MPJPE: {best_mpjpe:.4f}")
-        mlflow.log_metric("best_mpjpe", best_mpjpe)
+        if is_main:
+            log.info(f"Training complete. Best MPJPE: {best_mpjpe:.4f}")
+            mlflow.log_metric("best_mpjpe", best_mpjpe)
+    finally:
+        if is_main:
+            mlflow.end_run()
+        cleanup_ddp(world_size)
 
 
 def _export_onnx(

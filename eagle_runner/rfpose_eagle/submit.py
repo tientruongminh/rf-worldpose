@@ -11,6 +11,7 @@ TEMPLATE = Path(__file__).resolve().parents[1] / "templates" / "train_eagle.sbat
 CONFIG_TO_MODULE = {
     "transformer_gold": "rfpose.training.transformer_train",
     "transformer_eagle": "rfpose.training.transformer_train",
+    "ssl_cnn": "rfpose.training.transformer_train",
     "ssl_pretrain": "rfpose.training.ssl_pretrain",
     "ssl_eagle": "rfpose.training.ssl_pretrain",
     "finetune_room": "rfpose.training.transformer_train",

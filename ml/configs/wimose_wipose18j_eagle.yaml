@@ -1,0 +1,39 @@
+# Wi-Mose (arXiv:2012.14066v1) on WiPose 18-joint dataset
+# 2-GPU DDP training via torchrun --nproc_per_node=2
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-humanlike-v2"
+  datasets: ["wipose"]
+  n_joints: 18
+  n_subcarriers: 1350
+  window_size: 60
+  augment: true
+  require_pose: true
+  normalize_csi: true   # per-channel z-score
+  center_pose: true     # root-relative GT
+  root_joint: 1         # WiPose skeleton Neck
+
+model:
+  use_gcn_head: false
+
+loss:
+  huber_delta: 0.75   # exact value from Wi-Mose paper
+
+training:
+  device: "cuda"
+  epochs: 120
+  batch_size: 24        # per-GPU batch; WiPose N_sub=1350 needs more memory
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  patience: 30
+  save_every: 10
+  amp: true
+  num_workers: 4
+  seed: 42
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-wipose18j-v1"
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-wimose"
+  run_name: "wimose-wipose18j-2gpu-v1"

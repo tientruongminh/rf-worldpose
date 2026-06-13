@@ -1,0 +1,60 @@
+# MM-Fi 17 joints (Human3.6M skeleton) — CSI Transformer on Eagle
+defaults:
+  - transformer_gold
+
+data:
+  gold_dir: "pl0501-01/project_data/rf-worldpose/data/gold/rfpose-mmfi-17j-v1"
+  datasets: ["mmfi"]
+  n_subcarriers: 342          # 3 antennas × 114 subcarriers (avg over 10 snapshots)
+  n_joints: 17                # Human3.6M full skeleton
+  window_size: 60
+  augment: true
+  require_pose: true
+
+model:
+  patch_size: 6               # 342 / 6 = 57 patches
+  d_model: 256
+  spatial_heads: 8
+  temporal_heads: 8
+  n_spatial_layers: 4
+  n_temporal_layers: 4
+  n_decoder_layers: 3
+  n_decoder_temporal_layers: 2
+  ffn_mult: 4
+  predict_3d: true
+  causal_temporal: false
+  dropout: 0.15
+  num_actions: 28
+
+loss:
+  weighting_mode: "static"
+  lambda_coord: 1.0
+  lambda_vis: 0.3
+  lambda_bone: 0.3
+  lambda_temporal: 0.2
+  lambda_symmetry: 0.1
+  lambda_action: 0.3
+  coord_loss_type: "smooth_l1"
+
+training:
+  device: "cuda"
+  batch_size: 32
+  epochs: 80
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_epochs: 5
+  patience: 20
+  save_every: 5
+  amp: true
+  num_workers: 4
+  seed: 42
+  ssl_pretrained: ""
+  pretrained_from: ""
+  freeze_encoder: false
+  dry_run: false
+
+mlflow:
+  tracking_uri: "http://207.180.243.242:5000"
+  experiment_name: "rf-worldpose-transformer"
+  run_name: "mmfi-17j-v1"

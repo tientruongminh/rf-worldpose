@@ -16,6 +16,8 @@ class CsiPatchEmbedding2D(nn.Module):
     """
     def __init__(self, in_channels: int = 2, d_model: int = 256, patch_freq: int = 6, patch_time: int = 3):
         super().__init__()
+        patch_freq = int(patch_freq)
+        patch_time = int(patch_time)
         self.patch_freq = patch_freq
         
         # Stride=(patch_freq, 1) ensures we compress frequency but preserve every time frame.
@@ -60,6 +62,8 @@ class CSIViT2DPose(nn.Module):
         num_actions: int = 28
     ):
         super().__init__()
+        patch_freq = int(patch_freq)
+        n_subcarriers = int(n_subcarriers)
         self.d_model = d_model
         self.n_patches = n_subcarriers // patch_freq
         

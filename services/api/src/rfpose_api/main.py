@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 
 from rfpose_api.schemas.common import ApiMessage
-from rfpose_api.routers import deployments, sessions, datasets, training, models, helios, hpc
+from rfpose_api.routers import deployments, sessions, datasets, training, models, hpc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -13,7 +13,6 @@ app.include_router(sessions.router)
 app.include_router(datasets.router)
 app.include_router(training.router)
 app.include_router(models.router)
-app.include_router(helios.router)
 app.include_router(hpc.router)
 
 

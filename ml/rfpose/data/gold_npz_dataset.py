@@ -195,8 +195,14 @@ def build_gold_train_val(
     augment: bool = True,
     require_pose: bool = False,
     require_action: bool = False,
+    val_splits: tuple[str, ...] = ("val",),
 ) -> tuple[GoldNpzDataset, GoldNpzDataset]:
-    """Build train/val sets using metadata split if present, else random split."""
+    """Build train/val sets using metadata split if present, else random split.
+
+    ``val_splits`` controls which metadata split tags count as validation. If a
+    dataset has no validation split, ``test`` is used as a compatibility fallback
+    for older Gold datasets that only ship train/test metadata.
+    """
     full = GoldNpzDataset(
         gold_dir, split=None, datasets=datasets,
         augment=False, require_pose=require_pose,
@@ -217,6 +223,7 @@ def build_gold_train_val(
 
     train_idx = []
     val_idx = []
+    test_idx = []
     has_split = False
 
     for i, entry in enumerate(full.entries):
@@ -228,14 +235,21 @@ def build_gold_train_val(
                 if sp == "train":
                     train_idx.append(i)
                     has_split = True
-                elif sp in ("val", "test"):
+                elif sp in val_splits:
                     val_idx.append(i)
+                    has_split = True
+                elif sp == "test":
+                    test_idx.append(i)
                     has_split = True
 
     if has_split and train_idx:
-        log.info("Using metadata splits: train=%d val=%d", len(train_idx), len(val_idx))
+        eval_idx = val_idx if val_idx else test_idx
+        log.info(
+            "Using metadata splits: train=%d val=%d test=%d eval=%d",
+            len(train_idx), len(val_idx), len(test_idx), len(eval_idx),
+        )
         train_ds = _SubsetGoldNpz(full, train_idx, augment=augment)
-        val_ds = _SubsetGoldNpz(full, val_idx if val_idx else train_idx[-max(1, len(train_idx)//10):], augment=False)
+        val_ds = _SubsetGoldNpz(full, eval_idx if eval_idx else train_idx[-max(1, len(train_idx)//10):], augment=False)
         return train_ds, val_ds
 
     # Fallback: random split
