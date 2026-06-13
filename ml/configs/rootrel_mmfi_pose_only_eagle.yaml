@@ -1,0 +1,25 @@
+# rootrel MMFI — pose ONLY, train from scratch (no action loss)
+# Same arch/data as rootrel-mmfi-v1 (multitask 91% action) but lambda_action=0.
+# Init: SSL encoder only — NOT loading rootrel-mmfi-v1/best.pt
+defaults:
+  - rootrel_mmfi_eagle
+  - _self_
+
+data:
+  gold_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/data/gold/rfpose-unified-v2"
+  require_pose: true
+  require_action: false
+
+loss:
+  lambda_action: 0.0
+
+training:
+  pretrained_from: ""
+  ssl_pretrained: "s3://rfpose/mlflow/5/62a95b29c2e3499e82983f5e8ecb120e/artifacts/checkpoints/best"
+  freeze_encoder: false
+  epochs: 200
+  patience: 25
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/rootrel-mmfi-pose-only-v1"
+
+mlflow:
+  run_name: "rootrel-mmfi-pose-only-v1"

@@ -1,0 +1,30 @@
+# WiMose Proto1 pose ckpt → action-only fine-tune (freeze backbone, CE only)
+# Loads: checkpoints/wimose-mmfi17j-proto1-v1/best.pt
+defaults:
+  - wimose_mmfi17j_proto1_eagle
+  - _self_
+
+model:
+  num_actions: 28
+
+loss:
+  action_only: true
+  lambda_action: 1.0
+  action_class_weights: true
+  lambda_bone: 0.0
+  lambda_sym: 0.0
+  lambda_div: 0.0
+  lambda_unif: 0.0
+
+training:
+  epochs: 40
+  lr: 1.0e-3
+  patience: 12
+  warmup_epochs: 2
+  early_stop_metric: val_action_acc
+  pretrained_from: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-proto1-v1/best.pt"
+  freeze_backbone: true
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/wimose-mmfi17j-proto1-action-only-v1"
+
+mlflow:
+  run_name: "wimose-mmfi17-proto1-action-only-v1"

@@ -1,0 +1,29 @@
+# rootrel-mmfi-v1 → action-only fine-tune (freeze encoder, classification CE only)
+defaults:
+  - rootrel_mmfi_eagle
+  - _self_
+
+loss:
+  action_only: true
+  lambda_action: 1.0
+  lambda_root: 0.0
+  lambda_offset: 0.0
+  lambda_coord: 0.0
+  lambda_vis: 0.0
+  lambda_bone: 0.0
+  lambda_temporal: 0.0
+  lambda_symmetry: 0.0
+
+training:
+  ssl_pretrained: ""
+  pretrained_from: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/rootrel-mmfi-v1/best.pt"
+  freeze_encoder: true
+  epochs: 30
+  lr: 5.0e-4
+  patience: 10
+  warmup_epochs: 2
+  early_stop_metric: val_action_acc
+  checkpoint_dir: "/mnt/storage_6/project_data/pl0501-01/rf-worldpose/checkpoints/rootrel-mmfi-action-only-v1"
+
+mlflow:
+  run_name: "rootrel-mmfi-action-only-v1"
